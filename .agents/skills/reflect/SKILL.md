@@ -34,7 +34,7 @@ now writing most of the output) is a cluster like any other; a model change it s
 ASK-class.
 
 Every pass: read the report's `largest main-thread context` line against the
-auto-compaction limit (`autoCompactWindow` in `.claude/settings.json`; 300000 at
+auto-compaction limit (`model_auto_compact_token_limit` in `.codex/config.toml`; 300000 at
 init, a starting value). When sessions keep reaching the limit, or it has not been revisited
 in several weeks, a lower limit is a candidate ASK fix: give the measured peak, what a
 lower limit saves (cheaper turns, a more focused main thread) and what it risks (details not
@@ -53,7 +53,7 @@ intake answers, or the conversation) is a candidate standing procedure: propose 
 
 ## 3. Place each cluster on the ladder
 
-Search for an existing rule first: `grep -rn "<keyword>" AGENTS.md COORDINATOR.md docs/ notes/ hooks/`
+Search for an existing rule first: `grep -rn "<keyword>" AGENTS.md docs/ notes/ hooks/`
 and the `REFLECT` lines of the journal (was this proposed and declined before?).
 
 - **No rule yet** → a prose fix (a sentence in a discipline doc or a skill) is usually
@@ -90,7 +90,7 @@ with `notes/reflect-autonomy-heuristics.md`:
 
   It prints the proposal's id (`P…`) and writes the journal line. Then put every pending
   proposal (`bin/journal --pending`) to the owner with the tradeoff and your recommendation,
-  with the structured ask tool when there are several to accept or decline,
+  numbered, so the owner can answer "yes to 1 and 3",
   and run `bin/journal --shown`. On a yes: apply, test and commit in the same turn
   (`chore(reflect): <what>`), then `bin/journal --decide <id> yes`. On a no:
   `bin/journal --decide <id> no --reason "<their reason>"`. A "continue" decides nothing:

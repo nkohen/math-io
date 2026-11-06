@@ -2,7 +2,7 @@
 
 Hooks are the small Python scripts in `hooks/` that the harness runs when the agent acts
 (before a shell command, after it, at the end of a turn). They are registered in
-`.claude/settings.json` and built on [`hooks/_payload.py`](../../hooks/_payload.py), which
+`.codex/hooks.json` and built on [`hooks/_payload.py`](../../hooks/_payload.py), which
 turns the harness's payload into one `Event` (see [`normalize`](../../hooks/_payload.py))
 and supplies the responses: [`nudge_once`](../../hooks/_payload.py),
 [`block`](../../hooks/_payload.py), [`stop_continue`](../../hooks/_payload.py) and
@@ -56,8 +56,9 @@ Every hook must work when `ev.transcript_path` is empty. When you depend on a fi
 
 *Why:* the same moment looks different per harness, and a guessed field silently never
 matches.
-Example: in this harness the after-a-command payload carries no exit code; a failed
-command arrives as a separate `PostToolUseFailure` event.
+Example: this harness's payload formats were not all verified when the project was set
+up; before relying on a field, capture one real payload (log `ev.raw` once) and test
+against it.
 *Anti-scope:* none; this is how every hook is written.
 
 ## 4. Prefer a nudge to a block
@@ -73,7 +74,7 @@ wrong, a block that is wrong stops work.
 
 ## Removing or silencing a hook
 
-Delete its entry from `.claude/settings.json` (and the script and its selftest), run
+Delete its entry from `.codex/hooks.json` (and the script and its selftest), run
 `bin/selftest`, and note the removal in `notes/workflow-journal.md` so the next reflection
 pass knows it was deliberate. To silence every nudge for one session, start the harness with
 `HOOKS_QUIET=1`.

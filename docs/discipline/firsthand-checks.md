@@ -35,8 +35,8 @@ cover; put a line starting `Internal prior art:` in the brief saying what that w
   algebraic or combinatorial pattern), ask what it is known as before building on it: list
   candidate names, search under each, and check a fresh derivation for being a known
   construction. A name, once found, brings the literature that goes with it.
-- Hooks: `lit-search-predispatch` refuses the first search you dispatch in a
-  session, once, with a reminder of the internal half; the identical retry goes through; `lit-search-gate` nudges a commit that adds a status
+- Hooks: `lit-search-predispatch` records each search (this harness hides the brief from
+  hooks, so the `lit-search` agent itself checks for the `Internal prior art:` line); `lit-search-gate` nudges a commit that adds a status
   change or an attribution to a durable document when no search has been recorded since
   the file was last committed (or in the past 24 hours, for a new file), whatever the
   search was about.

@@ -1,6 +1,6 @@
 # Coordinator brief: <one line naming the work>
 
-RUN ON: strong tier (opus). This brief is for a coordinator that dispatches
+RUN ON: strong tier (gpt-6-astra). This brief is for a coordinator that dispatches
 workers; it is not itself a worker brief.
 
 Continuation mode: report progress inline and continue through each landed milestone. End

@@ -26,7 +26,7 @@ as passes happen.
 
 ## ASK: propose with the tradeoff, do not apply, when ANY holds
 
-1. It edits **AGENTS.md** or **COORDINATOR.md** beyond a one-line pointer to a doc that carries the rule.
+1. It edits **AGENTS.md** beyond a one-line pointer to a doc that carries the rule.
 2. It **widens what runs unattended or what an agent may do**: permissions, allowlists,
    settings, anything an injected instruction could ride on.
 3. It **adds automatic or scheduled behaviour** (a cadence, an end-of-turn hook that acts
@@ -58,7 +58,7 @@ project.
 Classes:
 
 - **A** — one incident turned into a rule on a frequent path.
-- **B** — wrong place: the rule belonged in a doc or a template, not AGENTS.md or COORDINATOR.md.
+- **B** — wrong place: the rule belonged in a doc or a template, not AGENTS.md.
 - **C** — widened a permission.
 - **D** — added automatic or scheduled behaviour.
 - **E** — encoded taste or direction without the owner.

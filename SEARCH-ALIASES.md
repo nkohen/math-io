@@ -12,5 +12,5 @@ misses because the project uses a different word, add a row.
 | second opinion, peer check, audit | reviewer, gate | `docs/discipline/gate-chain.md` |
 | keep going, may I stop, is this a checkpoint | continue signal | `docs/discipline/stopping.md` |
 | lessons learned, retrospective notes | workflow journal | `notes/workflow-journal.md` |
-| only the owner can, needs permission | owner levers | `COORDINATOR.md`, "Ground rules" |
+| only the owner can, needs permission | owner levers | `AGENTS.md`, "Ground rules" |
 | research command | watched command | `GLOSSARY.md` |

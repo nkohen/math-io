@@ -1,7 +1,7 @@
 # Model tiers, workers and escalation
 
 This project uses two model settings (`project.toml`, `[tiers]`): a **strong tier**
-(opus) and a **worker tier** (sonnet). This doc says what each one does,
+(gpt-6-astra) and a **worker tier** (gpt-6-luna). This doc says what each one does,
 how work moves between them, and how a worker hands back.
 
 ## Why two tiers
@@ -30,7 +30,7 @@ tier executes, checked by that mechanical signal.
   script plus its validation, a table.
 - **Reviewers never run below the tier of the author they review.** Their agent files pin
   them to the strong tier (`tier: strong` in the source, the strong model in
-  `.claude/agents/`), so a dispatch cannot lower it. *Why:* the review is the
+  `.codex/agents/`), so a dispatch cannot lower it. *Why:* the review is the
   signal everything else trusts; it is cheap per run, so there is nothing to save.
 - **A worker-tier session that meets a design question returns NEED-DIRECTION.** It does not
   pick a route, even when it feels sure. *Why:* choosing a route is the strong tier's job;
@@ -149,8 +149,6 @@ rules: [stopping.md](stopping.md). What a task leaves unspecified is a different
 long computation or a new line of work, the
 intake check (the coordinator's ground rules) takes each answer from
 `notes/procedures.md` and asks the owner about the rest, in one question.
-The hook `hooks/askquestion-fanout-nudge.py` nudges once when a structured question offers a
-single choice among three or more options.
 
 ## Measuring whether this works
 

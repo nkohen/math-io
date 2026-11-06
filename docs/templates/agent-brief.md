@@ -4,7 +4,7 @@ For ONE fresh agent doing ONE bounded task in a single turn. For several indepen
 threads use [dispatcher-brief.md](dispatcher-brief.md); for a brick list worked while the
 owner is present use [worker-handoff.md](worker-handoff.md).
 
-RUN ON: <strong tier (opus) | worker tier (sonnet)>, because <...>.
+RUN ON: <strong tier (gpt-6-astra) | worker tier (gpt-6-luna)>, because <...>.
 
 ## Ground rules for this run
 

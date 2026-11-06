@@ -102,9 +102,8 @@ of continue signal, and it stays in force until withdrawn:
   make) at the top of every report, not buried under later news.
 - A usage or rate limit with a reset time is a pause, not the end of the run. Keep RESUME
   HERE current so the run can be picked up.
-  If you can still act (a dispatched agent reported the limit), schedule a one-time task in
-  this session for just after the reset; it fires only if the session is still open and idle
-  then. Otherwise the next session resumes from RESUME HERE.
+  Nothing restarts the session after the reset: say in your report when it resets; the next
+  session resumes from RESUME HERE.
 - When you write a handoff for such a stretch, state the continuation mode in its first
   lines so the next agent starts in it.
 - The mandate does not skip the intake check: a long computation or a new line of work
@@ -118,7 +117,7 @@ next step to disk as you go (the design doc, the records, commits), so a reset l
 nothing. After a reset, rebuild the state from those files and `git log`, not from the
 summary. You cannot reset or summarize your own context on request: if the owner asks for
 that, write the resume notes to a fresh file, give them the path and the
-`/compact` command, and stop.
+harness's context-compaction command, and stop.
 
 ## 8. The continue nudge
 

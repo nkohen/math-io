@@ -7,12 +7,12 @@ for an idea under one word and the project calls it another.
 
 ## General
 
-- **owner**: the person who directs this workspace, named in `project.toml` (`[project] owner`). Some decisions are theirs alone (see COORDINATOR.md, "Ground rules").
-- **coordinator**: the agent session talking to the owner. It plans, dispatches other agents, checks their work and records results. Its own rules are in COORDINATOR.md, which only it gets.
+- **owner**: the person who directs this workspace, named in `project.toml` (`[project] owner`). Some decisions are theirs alone (see AGENTS.md, "Ground rules").
+- **coordinator**: the agent session talking to the owner. It plans, dispatches other agents, checks their work and records results.
 - **worker**: an agent the coordinator dispatches to carry out one well-specified unit of work.
 - **reviewer**: a fresh-context agent whose only job is to check one document from one angle and return a verdict and a list of problems. It never edits, and it always runs on the strong tier (see `project.toml` `[tiers]`). The core three are `claim-auditor`, `proof-referee` and `red-team`.
 - **durable**: written to a file in this repository (and committed), as opposed to only said in a chat or held in context.
-- **harness**: the program the agents run in (claude for this project).
+- **harness**: the program the agents run in (codex for this project).
 - **intake check**: the coordinator's list, before a long computation or a new line of work, of what the task leaves open; each item is answered from the standing procedures or asked of the owner, in one question.
 - **standing procedure**: one of the owner's default answers in `notes/procedures.md`, used unless the owner says otherwise for a task.
 - **genuine fork**: a choice that is the owner's to make: mutually exclusive designs, an irreversible or outward-facing action, or a scope decision. Only at one should an agent stop and ask.
@@ -89,7 +89,7 @@ for an idea under one word and the project calls it another.
 - **last look**: one fresh claim-auditor check before a proof is proposed, asking only whether the headline ignores anything the document's own gaps section lists.
 - **re-review limit**: three reviews of one document by one reviewer per cycle; at the limit the claim is recorded at the strength the last review supports, with its open issues listed.
 - **review miss**: a claim that passed a gate and was later refuted, narrowed or retracted; recorded as a `review-miss:` line for each gate that passed it.
-- **standing disagreement**: two gates, or a gate and the author, still disagreeing on a fact after one exchange; recorded under `## Disagreements`, given to an **adjudicator** (a fresh agent that must run a checkable step; the losing side is shown the step, not the ruling), and if still standing put to the owner, whose answer is an `owner-decision:` line.
+- **standing disagreement**: two gates, or a gate and the author, still disagreeing on a fact after one exchange; recorded under `## Disagreements`, and if still standing put to the owner, whose answer is an `owner-decision:` line.
 
 ## Writing for readers
 
@@ -142,7 +142,7 @@ for an idea under one word and the project calls it another.
 
 ## Model tiers and workers
 
-- **strong tier / worker tier**: the two model settings in `project.toml` `[tiers]` (see there for the models in use). The strong tier (opus) does direction, design and review; the worker tier (sonnet) does execution.
+- **strong tier / worker tier**: the two model settings in `project.toml` `[tiers]` (see there for the models in use). The strong tier (gpt-6-astra) does direction, design and review; the worker tier (gpt-6-luna) does execution.
 - **brick**: one self-contained unit of work with a stated finish line: a lemma to prove, a script to write and validate, a table to fill. Remaining work is always written as a numbered list of bricks.
 - **DONE / PARTIAL / NEED-DIRECTION**: the three ways a worker ends. DONE: the brick is finished and checked. PARTIAL: some of it landed, the rest is listed. NEED-DIRECTION: the worker hit an escalation trigger and hands back the facts without choosing.
 - **escalation trigger**: a mechanical condition (for example "the same goal failed 3 attempts") at which a worker must stop and return NEED-DIRECTION instead of judging whether it is stuck.

@@ -8,8 +8,7 @@ failure that is easy to cause and slow to notice.
 1. **Report, don't swallow, a refusal.** "If a command is blocked or a permission is
    denied, stop and report it verbatim. Do not work around it silently."
 2. **Never background a job and return.**
-   "Do not run anything in the background and do not end your turn while a job runs: a
-   dispatched agent is not woken when a background job finishes, so the job is orphaned."
+   "Do not detach any job: run commands in the foreground and wait for them to finish."
    The working split: the agent validates on ONE seconds-scale known-answer case and
    returns the exact command; the coordinator runs the long job. A timing probe over
    several representative cases is also coordinator work. Put any caveat into the returned

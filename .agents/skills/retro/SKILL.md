@@ -16,63 +16,12 @@ substantive feedback, say so in one line and stop; never log an empty retro.
 ## 1. Gather the owner's messages
 
 The main evidence is this session's conversation.
-To include earlier sessions since the last retro, read the owner's messages from the saved
-session transcripts. This prints only the owner's typed text, newest session last. It finds
-the time of the last retro itself (the latest `retro done at` journal line or `retro`
-proposal; with none, it reads every session), keeps only messages sent after that time, and
-skips the newest transcript, which is this session's (already in your context):
-
-```bash
-python3 - <<'EOF'
-import json, os, re, time, pathlib
-from datetime import datetime
-since = 0.0  # time of the last retro, as epoch seconds
-j = pathlib.Path("notes/workflow-journal.md")
-if j.exists():
-    for m in re.finditer(r"RETRO: retro done at (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)", j.read_text(encoding="utf-8")):
-        since = max(since, time.mktime(time.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S")))
-q = pathlib.Path("logs/proposals.jsonl")
-for line in q.open(encoding="utf-8") if q.exists() else []:
-    try:
-        r = json.loads(line)
-        if r.get("kind") == "proposal" and r.get("source") == "retro":
-            since = max(since, time.mktime(time.strptime(r["ts"], "%Y-%m-%dT%H:%M:%S")))
-    except (ValueError, KeyError, TypeError):
-        continue
-print("last retro:", time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(since)) if since else "none")
-d = pathlib.Path.home() / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", os.getcwd())
-files = sorted(d.glob("*.jsonl"), key=lambda p: p.stat().st_mtime)[:-1]  # the newest is this session
-for f in files:
-    if f.stat().st_mtime < since:
-        continue
-    shown = False
-    for line in f.open(encoding="utf-8", errors="replace"):
-        try:
-            r = json.loads(line)
-        except ValueError:
-            continue
-        if r.get("type") != "user" or r.get("isMeta") or r.get("isSidechain"):
-            continue
-        try:  # the message's own time; a record without one is kept
-            if datetime.fromisoformat(r["timestamp"].replace("Z", "+00:00")).timestamp() <= since:
-                continue
-        except (KeyError, ValueError, AttributeError):
-            pass
-        c = r.get("message", {}).get("content")
-        texts = [c] if isinstance(c, str) else [b.get("text", "") for b in c or []
-                                                  if isinstance(b, dict) and b.get("type") == "text"]
-        for t in texts:
-            if t.strip() and not t.lstrip().startswith("<"):
-                if not shown:
-                    print(f"=== session {f.stem}")
-                    shown = True
-                t = t.strip().replace("\n", " ")
-                print("-", t if len(t) <= 4000 else t[:4000] + " [cut]")
-EOF
-```
-
-Run it from the project root. If the directory does not exist, the transcripts are kept
-elsewhere on this machine; work from this session and the logs instead.
+This harness's saved-session format is not documented, so earlier sessions are not read
+directly. For them, use what was recorded: read `logs/feedback.jsonl`, the
+`logs/friction.jsonl` rows with `"source": "owner"`, and `notes/workflow-journal.md`
+directly (not with `bin/journal --show-new`, which belongs to the reflection pass). Since
+the last retro means since the last `RETRO` line, or the project's first commit date if there
+is none.
 
 Skip anything already in `logs/feedback.jsonl` or logged as friction: the reflection loop
 already has it, and counting it twice inflates the cluster.
@@ -124,7 +73,7 @@ An item that fits no label goes in as a `journal` line instead.
 Then mark the retro done, even when it proposed nothing, so the next retro starts here:
 
 ```bash
-bin/journal --add journal "retro done at $(date +%Y-%m-%dT%H:%M:%S): <n> items, <m> proposals" --kind RETRO
+bin/journal --add journal "retro done: <n> items, <m> proposals" --kind RETRO
 ```
 
 ## 5. Present 2–4 changes

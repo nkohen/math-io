@@ -24,7 +24,8 @@ How to walk them through it:
 
 First run `bin/doctor`. It checks the live session, not the files: that this session
 started in the project's own folder, that the project's hooks (its automatic checks) ran
-for that very command, and, once there are any, that subagents run as the project's own agents.
+for that very command, that Codex trusts the folder and runs the main thread on the
+configured model, and, once there are any, that subagents run as the project's own agents.
 For each FAIL, tell the owner in plain words what is not loaded and how to fix it (each
 line says how), and stop here until it passes: work done in a session that fails it runs
 without the project's reviewers, checks and settings, and nothing else would tell them.
@@ -33,9 +34,13 @@ arrangement), go on, but first say which protections are missing, one per FAIL l
 log the failure as a setup problem (`bin/journal --add friction "doctor FAIL, continued on the owner's say-so: <the FAIL lines>"`).
 Typical fixes: start the agent again from the project folder (in a terminal, `cd` into it
 first; in VS Code, File > Open Folder… and choose the project folder itself, not a folder
-above it); on Windows, from Ubuntu rather than the Windows side. If the project's path starts with
+above it); on Windows, from Ubuntu rather than the Windows side; trust the folder when Codex
+asks, and type `/hooks` and trust the project's hooks. If the project's path starts with
 `/mnt/`, it is on the Windows drive, where it runs slowly; mention that moving it into the
 Linux home folder helps.
+
+If they use the Codex extension in VS Code, suggest running `codex` in VS Code's built-in
+terminal instead: the extension does not load plugins and may skip the hooks.
 
 Run `bin/selftest`. If every line says PASS, tell them the setup is healthy in one
 sentence. If a line says FAIL, run `bin/selftest -v`, explain what is broken, and offer to
@@ -46,14 +51,14 @@ fix it before going on.
 Name the four things this workspace is for, one line each, with how to start each one
 (they can also just say it in plain words):
 
-- **Verify** (`/verify`): check a proof, a section or a whole paper; every verdict comes from
+- **Verify** (`$verify`): check a proof, a section or a whole paper; every verdict comes from
   a separate reviewer and goes into the document's check record, and a whole paper can be
   checked unattended, ending in a report.
-- **Review a draft** (`/review-draft`): feedback on their own draft or a colleague's, written
+- **Review a draft** (`$review-draft`): feedback on their own draft or a colleague's, written
   for its author in `review.md`.
-- **Guided reading** (`/guided-reading`): work through a paper or a chapter at their pace,
+- **Guided reading** (`$guided-reading`): work through a paper or a chapter at their pace,
   picking up where the last sitting stopped.
-- **Write** (`/write`): drafts, notes or an exposition in LaTeX, built into a PDF, with each
+- **Write** (`$write`): drafts, notes or an exposition in LaTeX, built into a PDF, with each
   proof reviewed before it is committed.
 
 ## 3. Where their documents go
@@ -77,7 +82,8 @@ In a few sentences, explain what a working session looks like:
   you do").
 - When something in the setup gets in their way, they can just say so: you log it
   (the `friction` skill), and the `reflect` skill later turns recurring problems into
-  fixes. Any reminder that annoys them can be switched off (`docs/OWNER.md`, "Switching
+  fixes. To run a skill themselves, they type `$` and its name (for
+  example `$reflect`); `/skills` lists them. Any reminder that annoys them can be switched off (`docs/OWNER.md`, "Switching
   off a nudge").
 - Coming back another day: open a terminal, `cd` into this folder, start the agent, and
   ask where things stand. The files hold the state; nothing depends on this session.

@@ -39,9 +39,10 @@ Every other commit passes the review check untouched.
 1. Dispatch the reviewer with the **target file's path named in its brief**. The hook
    `hooks/gate-dispatch-log.py` records `{gate, path, content hash}` in
    `.gates/dispatches.jsonl`.
-   It fires when a new reviewer agent is spawned (the agent
-   type names the gate; failing that, exactly one reviewer name must appear in the brief),
-   and it records each existing project file the brief names.
+   This harness hides a spawned agent's brief from hooks, so the record is made when the
+   reviewer **finishes**: from the `Reviewed: <path>` first line of its reply (every
+   reviewer is instructed to write one), with the hash of the file at that moment. If the
+   reviewer leaves that line out, every project file its reply names is recorded instead.
    A follow-up message to a
    reviewer that is already running is **not** a dispatch and is not recorded: spawn the
    reviewer again on the new text. If you give the reviewer a section extract, still name

@@ -5,15 +5,15 @@ name = "math-io"
 # Your name, as the agents address you. bin/setup asks for it on the first run.
 owner = "the owner"
 # The agent program this copy of math-io is laid out for; bin/doctor reads it.
-harness = "claude"
+harness = "codex"
 
 [tiers]
 # Which model plays each role. Reviewers must never run on a weaker model than the author
-# of what they review. Recorded at init: the main thread's model (`.claude/settings.json`) and
+# of what they review. Recorded at init: the main thread's model (`.codex/config.toml`) and
 # each agent file's model were set from these, and
-# only bin/usage-report reads this table later (to label models by tier). To change a model, edit those files (`.claude/agents/*.md`, `model:`).
-strong = "opus"
-worker = "sonnet"
+# only bin/usage-report reads this table later (to label models by tier). To change a model, edit those files (`.codex/agents/*.toml`, `model =`).
+strong = "gpt-6-astra"
+worker = "gpt-6-luna"
 
 [field_profile]
 # How the mathematics in this workspace behaves; read by agents at the deep-core gate
@@ -90,7 +90,7 @@ provenance = ["NEEDS-CITATIONS"]
 # reviews. Optional keys `start` and `end` (lists of regexes) override the block markers;
 # `enabled = false` switches this proof check off.
 paths = ["**/*.md", "**/*.tex"]
-exclude = ["docs/**", "logs/**", ".claude/**", ".gates/**", "**/TEMPLATE*", "AGENTS.md", "COORDINATOR.md", "GLOSSARY.md", "documents/*/source/**", "documents/*/units/**"]
+exclude = ["docs/**", "logs/**", ".codex/**", ".agents/**", ".gates/**", "**/TEMPLATE*", "AGENTS.md", "GLOSSARY.md", "documents/*/source/**", "documents/*/units/**"]
 gates = ["proof-referee", "claim-auditor"]
 
 # A check record whose status becomes `checked` needs the claim-auditor's review of the record

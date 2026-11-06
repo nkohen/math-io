@@ -8,9 +8,10 @@ reflection loop exists so the setup changes as you learn what helps.
 This workspace is a copy of math-io; updates to math-io arrive with `git pull` (see
 "Updates" below). Terms you will meet:
 
-- **harness**: the agent program you run (Claude Code).
-- **skill**: a named procedure the agent follows when asked (you type
-  `/reflect`, for example).
+- **harness**: the agent program you run (Codex CLI).
+- **skill**: a named procedure the agent follows when asked (you type `$` and its name, for
+  example `$reflect`; `/skills` lists them, and asking in plain words works too. They are
+  not `/` commands).
 - **hook**: a small script the harness runs before or after an agent's action.
 - **nudge**: a hook that refuses an action once with an explanation and lets an identical
   retry through.
@@ -22,7 +23,7 @@ This workspace is a copy of math-io; updates to math-io arrive with `git pull` (
 
 ## Before you start
 
-- The harness CLI: Claude Code (`claude`).
+- The harness CLI: Codex CLI (`codex`).
 - Python 3.11 or newer (`python3 --version`); `bin/selftest` and the hooks need it.
 - git.
 - TeX (optional; only to build PDFs from LaTeX): TeX Live on Linux and Windows, MacTeX on macOS.
@@ -33,7 +34,7 @@ Do these the first time, in order. The next section lists steps that can wait.
 
 You need not work through this list by reading it: after `bin/setup`, start the agent in
 this folder and
-type `/getting-started`, and it
+type `$getting-started`, and it
 walks you through these steps one at a time, doing the parts it can.
 
 Every step below starts from a terminal in this project's folder. Open the Terminal app
@@ -46,15 +47,14 @@ each time you come back to the project.
   for TeX, runs `bin/selftest`, and prints the next step. Running it again is safe: it only
   fixes what is missing.
 - **Start a session (required).**
-  Run `claude` in this directory. The first time, it asks whether to trust this folder: say
-  yes. The project's own checks (the scripts in `bin/` that only check or record) run
-  without asking. For any other command it asks first; if you cannot tell what a command
-  does, say "no" and ask the agent to explain it. `CLAUDE.md` imports `AGENTS.md`, so the
-  agent reads the rules on its own: every agent gets `AGENTS.md`, and the main session (the
-  one you talk to) also gets `COORDINATOR.md`, its own rules, from a hook at its start.
+  Run `codex` in a terminal in this directory; it reads `AGENTS.md`. The first time, Codex
+  asks whether to trust this folder: say yes, because it reads the project's
+  `.codex/config.toml` only in a trusted folder. Then type `/hooks` in Codex and trust the
+  project's hooks: Codex skips untrusted project hooks, including in `codex exec`.
+  That config file also lets agents commit (see "Letting agents commit" below).
 - **`bin/doctor`, the check that the session loaded the project (first session).** The
   getting-started skill has the agent run it: it confirms the agent was started in this
-  folder, that the project's hooks run, and that reviewers
+  folder, that the project's hooks run, that Codex trusts the folder, and that reviewers
   run as the project's own agents. If it reports a problem, fix that first: without these
   the agents work with none of the project's checks, and nothing else shows it. Ask an agent
   to run it again whenever something seems off.
@@ -91,14 +91,14 @@ None of these is needed in the first session; each says when it applies.
 
 Four things, each a skill the agent follows; type its name, or just say what you want:
 
-- **`/verify`**: check a proof, a section or a whole paper. Every verdict comes from a
+- **`$verify`**: check a proof, a section or a whole paper. Every verdict comes from a
   separate reviewer and is recorded in the document's check record. A whole paper can be
   checked while you are away: say so, and it ends with a report.
-- **`/review-draft`**: feedback on your own draft or a colleague's, written for its author in
+- **`$review-draft`**: feedback on your own draft or a colleague's, written for its author in
   `review.md`. Nothing is sent: you decide what goes to the author.
-- **`/guided-reading`**: work through a paper or a chapter at your pace; each sitting picks up
+- **`$guided-reading`**: work through a paper or a chapter at your pace; each sitting picks up
   where the last stopped.
-- **`/write`**: your own drafts, notes or expositions in LaTeX, built into a PDF with
+- **`$write`**: your own drafts, notes or expositions in LaTeX, built into a PDF with
   `bin/pdf <slug>`, with each proof reviewed before it is committed.
 
 ## Your documents
@@ -135,7 +135,7 @@ If an agent makes one of these changes without your say-so, undo it.
   asks you only about the rest, in one question. Agents propose additions when you have
   answered the same question the same way twice; only you edit the file.
 - **Approve an ASK change from the reflection loop** (see below): a change to this setup that
-  only you may approve, such as an edit to AGENTS.md or COORDINATOR.md, a widened permission or a new
+  only you may approve, such as an edit to AGENTS.md, a widened permission or a new
   blocking check.
 - **Accept a check record.** When an agent reports a document `checked` (every proof
   reviewed, and the record itself reviewed), read `bin/checks report <slug>`. If you agree,
@@ -156,15 +156,15 @@ files and `.gates/*.jsonl` do not exist at first: `bin/journal` and the hooks cr
 on first use.
 
 - To record a correction, tell the agent what went wrong, or ask it to log friction.
-- Every so often (or when an agent suggests it), run the reflect skill (type `/reflect`).
+- Every so often (or when an agent suggests it), run the reflect skill (type `$reflect`).
   It groups what recurred and proposes fixes. Small, reversible fixes (AUTO) are applied
   and reported; anything
-  that changes AGENTS.md or COORDINATOR.md, widens a permission or adds a blocking check (ASK) waits for your
+  that changes AGENTS.md, widens a permission or adds a blocking check (ASK) waits for your
   yes. Auto-applied fixes are tagged `[auto-applied]` in the journal so you can audit them.
 - Proposals waiting for you are listed, numbered, at the end of an agent's reply; answer
   "yes to 1, no to 2" whenever it suits you. Saying "continue" leaves them waiting, and a
   later reply reminds you. `bin/journal --pending` lists them at any time.
-- At the end of a session where you gave a lot of feedback, ask for the retro skill (`/retro`). It asks
+- At the end of a session where you gave a lot of feedback, ask for the retro skill (`$retro`). It asks
   what standing change would have made that feedback unnecessary.
 
 ## Switching off a nudge
@@ -173,24 +173,26 @@ The hooks live in `hooks/`. Most are nudges: they refuse an action once with an 
 and let an identical retry through.
 
 - To silence every nudge for one session, start the harness like this:
-  `HOOKS_QUIET=1 claude`.
+  `HOOKS_QUIET=1 codex`.
 - The safety guard blocks a few risky commands outright: recursive deletes, `sudo`, a
   force push to the main branch, and others listed in `hooks/guard.py`. To lift its blocks
   for a session, run `export GUARD_OFF=1` in the shell that launches the agent, then start
   the harness from that shell. Do this only after reading why the command was blocked.
 - To switch off only the continue nudge, set `CONTINUE_NUDGE_OFF=1` the same way.
-- To remove one nudge for good, delete its entry from `.claude/settings.json` (and the
+- To remove one nudge for good, delete its entry from `.codex/hooks.json` (and the
   script from `hooks/`), then run `bin/selftest`. Note it in the journal, so the reflection
   loop knows it was removed on purpose.
 - Blocking checks (for example the safety guard) explain how to proceed in their message.
 
+## Letting agents commit
 
-## Web access
-
-`.claude/settings.json` lets agents use web search and web fetch without asking you each
-time (its `permissions` block). The literature-search agent needs them, and when it runs in
-the background it cannot stop to ask, so without this its searches are refused. To approve
-each web call yourself instead, delete those two entries.
+Codex's standard sandbox lets agents edit files here but keeps `.git` read-only, so on its
+own an agent cannot run `git commit`.
+You chose to let agents commit, so `.codex/config.toml` defines a permission profile,
+`project-git`: the standard sandbox plus a writable `.git`. To go back to approving each
+commit, delete the profile from that file. If commits fail with a permission error, check
+whether Codex was started with `-s`/`--sandbox` (including `codex exec -s workspace-write`):
+that option replaces the profile.
 
 
 **Offline mode.** For work that must not leave your computer (a colleague's unpublished
@@ -205,21 +207,18 @@ is marked "not verified (offline)". `bin/offline off` turns web access back on;
 
 You can skip this section unless you want different models.
 
-`project.toml` maps two roles to models: **strong** (`opus`) plans, reviews
-and writes anything durable; **worker** (`sonnet`) carries out well-specified
+`project.toml` maps two roles to models: **strong** (`gpt-6-astra`) plans, reviews
+and writes anything durable; **worker** (`gpt-6-luna`) carries out well-specified
 units. A reviewer must never run on a weaker model than the author of what it reviews.
-The main thread is the strong tier: its model is set in `.claude/settings.json`
-(`"model"`), so a session does not fall back to the harness's default.
+The main thread is the strong tier: its model is set in `.codex/config.toml` (`model =`), so a session does not fall back to the harness's default.
 The models were written into that file and each agent file at init; `[tiers]` only records them
 (and `bin/usage-report` reads it to label each model's tier). To
-change one, edit those model lines: `.claude/agents/*.md` (`model:`) for agents.
-`/model` switches the main thread for one session only.
+change one, edit those model lines: `.codex/agents/*.toml` (`model =`) for agents.
 
 **Context compaction.** When a session's conversation reaches 300000 tokens, the
 harness compacts it: it replaces the history with a summary and carries on. The agents keep
 everything that matters in files, so little is lost, and a shorter context makes each turn
-cheaper and keeps the main thread focused. The limit is set in `.claude/settings.json`
-(`"autoCompactWindow"`). 300000 is a starting value, not a
+cheaper and keeps the main thread focused. The limit is set in `.codex/config.toml` (`model_auto_compact_token_limit`). 300000 is a starting value, not a
 tuned one: a lower limit compacts more often, which costs less and keeps sessions sharper, but
 a session can lose track of details it did not write down. `bin/usage-report` shows the largest
 context a session reached; the reflection pass looks at it and asks you before it changes
@@ -230,11 +229,12 @@ the limit. You can also change it yourself at any time.
 A hook copies token counts (never text) from the harness's session record into
 `logs/usage.jsonl` at the end of every turn: per model, and per main thread or subagent.
 `bin/usage-report` totals them by model, role, day, week or session and shows how much of
-the output the main thread wrote versus subagents. It shows tokens, not money: to see an
+the output the main thread wrote versus subagents, plus the latest
+plan-limit percentages Codex reports. It shows tokens, not money: to see an
 estimate, put your own per-model rates under `[usage.prices]` in `project.toml` (empty at
 first, deliberately: rates change and depend on your plan). `bin/usage-report --backfill`
 imports sessions from before the hook was set up, as far back as the harness still keeps
-them (Claude Code deletes transcripts after 30 days by default). The log is committed;
+them. The log is committed;
 to stop it, set `USAGE_LOG_OFF=1` or remove the module. Details:
 `docs/discipline/usage.md`.
 
@@ -252,8 +252,8 @@ Lean, research questions and conjectures, ...). To add one, ask an agent to do i
 plugin or its repository); each module is a folder under
 `skills/init-math/scripts/templates/modules/`, and its `module.toml` lists what it adds. Ask
 the agent to apply that one module to this project by hand: its `bin/` scripts and hooks,
-its `docs/discipline/` page, its hook registrations in `.claude/settings.json`, its tables
-in `project.toml`, its section of `AGENTS.md` and `COORDINATOR.md` (its AGENTS fragment, rendered for each) and its terms in `GLOSSARY.md`. Tell it to fit
+its `docs/discipline/` page, its hook registrations in `.codex/hooks.json`, its tables
+in `project.toml`, its section of `AGENTS.md` and its terms in `GLOSSARY.md`. Tell it to fit
 them to anything you have changed here rather than overwrite your changes, then run
 `bin/selftest`. Read the diff before it is committed.
 

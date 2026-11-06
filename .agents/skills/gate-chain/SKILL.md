@@ -112,9 +112,7 @@ CHANGED: <on a re-review: what changed, and where>
   (a corroborated reading); the citation stays the original source.
   The proof-referee reads only what it is given; a relied-on citation with no statement
   supplied is listed `not checked: statement not supplied` and the verdict is `NEEDS-WORK`.
-- A hook (`brief-leak-nudge`) refuses once a reviewer brief that carries a verdict word, a
-  credence line or an "already checked" phrase. If the line is needed (a quoted evidence
-  entry), send the same brief again.
+- No hook can see a brief on this harness: this section is yours to follow.
 
 ## The last look before a proof is proposed
 
@@ -177,16 +175,7 @@ why is still listed.
    its verdict word), stamped `--kind exchange`. If they still disagree, write both
    positions in the staging file under `## Disagreements`, each classified (a fact, a
    definition, the scope, whether a gap is minor).
-   Then dispatch an **adjudicator**: the general agent (no agent file), told it reads and
-   computes but edits nothing. Its brief: the text, the two positions as "Argument A" (the
-   earlier) and "Argument B", with no gate names and no verdict words, and the question
-   "which is right, and what checkable step shows it?" It must run or write out that step (a
-   computation, a small case worked by hand, a quoted definition) and return the step and its
-   result; a ruling with no such step is unresolved. Then dispatch the gate it ruled against
-   again, fresh, with the step and its result as new evidence: not the adjudicator's argument
-   or its ruling, which a reviewer tends to concede to whether right or wrong. If that gate
-   now agrees, the disagreement is settled: record the step under `## Disagreements`.
-   Otherwise, or if the adjudicator gave no step,
+   Then
    keep the claim at the strength both sides accept, and put the question to the owner under
    "Needs your decision" in your next report.
    Keep a minority verdict in the file; never overwrite it. Record the owner's answer in the

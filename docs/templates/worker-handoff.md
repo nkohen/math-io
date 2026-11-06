@@ -1,6 +1,6 @@
 # Worker handoff: <one line naming the brick list>
 
-RUN ON: worker tier (sonnet). Why this tier: <the bricks are fully specified;
+RUN ON: worker tier (gpt-6-luna). Why this tier: <the bricks are fully specified;
 no route choices remain>. Use this template only while the owner (the owner) is present. For an
 unattended stretch, write a coordinator brief instead
 ([dispatcher-brief.md](dispatcher-brief.md)), so that escalations go to a coordinator.

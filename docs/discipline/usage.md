@@ -8,8 +8,7 @@ or whether a kind of work should be delegated: measured shares, not impressions.
 
 ## What is recorded, and what never is
 
-At every end of turn (`Stop`), when a subagent finishes (`SubagentStop`) and when a session
-ends (`SessionEnd`), `hooks/usage-log.py` reads the part of the transcript written since its
+At every end of turn (`Stop`), when a subagent finishes (`SubagentStop`), `hooks/usage-log.py` reads the part of the transcript written since its
 last run and appends rows to **`logs/usage.jsonl`**:
 
 | Field | Meaning |
@@ -37,7 +36,7 @@ agent briefs or descriptions. The hook reads the token-count fields and the agen
 nothing else leaves the transcript.
 
 **Where it lives.** `logs/usage.jsonl` is **committed**: agents add it to each commit when it
-changed, as COORDINATOR.md asks (counts only, merged by union like
+changed, as AGENTS.md asks (counts only, merged by union like
 the other logs). Only `logs/state/` is ignored by git: `usage-offsets.json` there remembers
 how far each transcript was read. If that file is lost, the hook falls back on the
 `src`/`upto` fields of the log, so nothing is counted twice.
@@ -75,10 +74,8 @@ bin/usage-report --backfill           # first import sessions the hook did not s
   estimate measures relative weight, not money charged.
 
 **Backfill** imports from the harness's store:
-`~/.claude/projects/<this project's path, with every non-alphanumeric character as "-">/`
-(that naming is the harness's, observed rather than documented). Claude Code deletes
-transcripts older than `cleanupPeriodDays` (default 30), so anything older is gone; run a
-backfill soon after setting this module up if you want the earlier weeks. `--transcripts DIR` reads every `*.jsonl` under `DIR` instead,
+`~/.codex/sessions/`, every rollout whose recorded working directory is this
+project (or inside it). `--transcripts DIR` reads every `*.jsonl` under `DIR` instead,
 in either harness's format. Rows already logged are skipped (by file name and offset), so a
 backfill can be run any number of times.
 

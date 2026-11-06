@@ -1,6 +1,6 @@
 # Discipline docs
 
-The reasoning behind the rules in [AGENTS.md](../../AGENTS.md) and [COORDINATOR.md](../../COORDINATOR.md). Open the one you need
+The reasoning behind the rules in [AGENTS.md](../../AGENTS.md). Open the one you need
 at the moment its rule applies; each rule there names that moment.
 
 | Doc | Topic |
