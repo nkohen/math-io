@@ -1,0 +1,7 @@
+# Wiki log
+
+One entry per operation on the wiki, newest last. Append; never edit or delete an entry.
+Format: `## [YYYY-MM-DD] operation | description`, where operation is one of `init`, `ingest`,
+`synthesize`, `query`, `lint`, `reorganize`.
+
+## [2026-11-05] init | wiki created

@@ -1,0 +1,8 @@
+# Hook state and scratch: local to each clone, never committed.
+logs/state/
+__pycache__/
+*.pyc
+.DS_Store
+scratch/
+# Local copies of sources whose text cannot be committed (the pointer in wiki/raw/ is the record)
+wiki/raw/local/

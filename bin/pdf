@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""Build a document's LaTeX into a PDF, and say plainly what went wrong if it fails.
+
+selftest: yes
+
+  bin/pdf <slug> [<file.tex>]   build documents/<slug>/<file.tex> (default: the one top-level
+                                .tex file with \\documentclass) into documents/<slug>/build/
+  bin/pdf --selftest
+
+Runs latexmk (or, without it, pdflatex twice) in non-interactive mode, so a LaTeX error
+stops the build instead of waiting for input. build/ is git-ignored: the PDF is rebuilt from
+the source, never committed. Needs a TeX installation (bin/setup reports whether there is
+one).
+"""
+from __future__ import annotations
+
+import contextlib
+import io
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+CLASS = re.compile(r"^\s*\\documentclass", re.M)
+
+
+def main_file(folder: Path, name: str | None) -> Path | str:
+    if name:
+        p = folder / name
+        return p if p.is_file() else f"no {p.relative_to(folder.parent.parent)}"
+    mains = [p for p in sorted(folder.glob("*.tex")) if CLASS.search(p.read_text(errors="replace"))]
+    if len(mains) == 1:
+        return mains[0]
+    if not mains:
+        return f"no top-level .tex file with \\documentclass in documents/{folder.name}/"
+    return f"several main files ({', '.join(p.name for p in mains)}): name one"
+
+
+def errors(log: str) -> list[str]:
+    out, lines = [], log.splitlines()
+    for i, ln in enumerate(lines):
+        if ln.startswith("!") or re.match(r"^\S+\.tex:\d+: ", ln):
+            out.append("  " + " ".join(x.strip() for x in lines[i:i + 3] if x.strip()))
+        if len(out) >= 5:
+            break
+    return out
+
+
+def build(root: Path, slug: str, name: str | None) -> int:
+    folder = root / "documents" / slug
+    if not folder.is_dir():
+        print(f"FAIL  no documents/{slug}/ (bin/doc new first)")
+        return 1
+    main = main_file(folder, name)
+    if isinstance(main, str):
+        print(f"FAIL  {main}")
+        return 1
+    out = folder / "build"
+    out.mkdir(exist_ok=True)
+    gi = out / ".gitignore"
+    if not gi.exists():
+        gi.write_text("*\n")
+    flags = ["-interaction=nonstopmode", "-halt-on-error", "-file-line-error"]
+    if shutil.which("latexmk"):
+        runs = [["latexmk", "-pdf", *flags, f"-outdir={out}", main.name]]
+    elif shutil.which("pdflatex"):
+        runs = [["pdflatex", *flags, f"-output-directory={out}", main.name]] * 2
+    else:
+        print("FAIL  no TeX installation (latexmk or pdflatex): install TeX Live (Linux, Windows) "
+              "or MacTeX (macOS)")
+        return 1
+    for cmd in runs:
+        r = subprocess.run(cmd, cwd=folder, capture_output=True, text=True, errors="replace")
+        if r.returncode != 0:
+            logf = out / (main.stem + ".log")
+            log = logf.read_text(errors="replace") if logf.exists() else r.stdout
+            print(f"FAIL  LaTeX stopped on documents/{slug}/{main.name}:")
+            print("\n".join(errors(log) or ["  (no error line found; see " + str(logf.relative_to(root)) + ")"]))
+            return 1
+    pdf = out / (main.stem + ".pdf")
+    print(f"PASS  documents/{slug}/build/{pdf.name}")
+    return 0
+
+
+def selftest() -> int:
+    bad: list[str] = []
+    with tempfile.TemporaryDirectory() as t, contextlib.redirect_stdout(io.StringIO()):
+        root = Path(t)
+        f = root / "documents" / "d"
+        f.mkdir(parents=True)
+        if build(root, "d", None) != 1:
+            bad.append("no main file must fail")
+        (f / "a.tex").write_text("\\documentclass{article}\\begin{document}Hi.\\end{document}\n")
+        (f / "b.tex").write_text("\\documentclass{article}\\begin{document}Ho.\\end{document}\n")
+        if not isinstance(main_file(f, None), str):
+            bad.append("two main files must ask for a name")
+        (f / "b.tex").write_text("\\section{Included}\n")
+        if main_file(f, None) != f / "a.tex":
+            bad.append("the one file with \\documentclass is the main file")
+        if errors("x\n! Undefined control sequence.\nl.3 \\foo\n") == []:
+            bad.append("errors() must find a '!' line")
+        if shutil.which("latexmk") or shutil.which("pdflatex"):
+            if build(root, "d", None) != 0 or not (f / "build" / "a.pdf").exists():
+                bad.append("a minimal document must build")
+            (f / "a.tex").write_text("\\documentclass{article}\\begin{document}\\nosuchmacro\\end{document}\n")
+            if build(root, "d", None) != 1:
+                bad.append("a LaTeX error must fail, not hang")
+    for b in bad:
+        print("SELFTEST FAIL", b)
+    print(f"pdf selftest: {'ok' if not bad else f'{len(bad)} failed'}")
+    return 1 if bad else 0
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["--selftest"]:
+        sys.exit(selftest())
+    if not sys.argv[1:] or len(sys.argv) > 3:
+        print(__doc__)
+        sys.exit(2)
+    sys.exit(build(ROOT, sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else None))

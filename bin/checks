@@ -1,0 +1,804 @@
+#!/usr/bin/env python3
+"""A document's check record (documents/<slug>/checks.md): fill it, verify it, report it.
+
+selftest: yes
+
+  bin/checks init <slug>                      write checks.md from the template
+  bin/checks add <slug> <unit> --where "<where>"
+      a row for one unit (U01, U02, ...). For someone else's document (or your draft kept
+      outside the workspace) the unit file documents/<slug>/units/<unit>.md must exist.
+  bin/checks set <slug> <unit> <verdict> [--note "<quote>"] [--file <draft>] [--stamp <id>]
+      verdict: checked | gap | citation-missing | unclear | open. Takes the latest
+      proof-referee stamp on the reviewed text as it is now (the unit file, or for your own
+      draft the draft file) and refuses a verdict it does not back.
+  bin/checks reuse <slug> <unit>              fill the row from a passing proof-referee
+                                              stamp on identical content anywhere
+  bin/checks fidelity <slug> [<unit> ...]     is each unit's Statement and Proof word for
+                                              word in source/? (LaTeX or text sources; a PDF
+                                              cannot be checked this way)
+  bin/checks summary <slug>                   write the Summary's three count lines
+  bin/checks verify [<slug> ...] [--staged]   exit 1 on any FAIL. --staged checks the
+                                              staged checks.md files against staged content
+                                              (the commit gate runs this)
+  bin/checks report <slug>                    the plain-text report a run ends with
+  bin/checks --selftest
+
+Rules: docs/discipline/checking.md.
+"""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import hashlib
+import io
+import json
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import tomllib
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+VERDICTS = ("open", "checked", "gap", "citation-missing", "unclear")
+NEEDS_NOTE = ("gap", "citation-missing", "unclear")
+STATUSES = ("open", "checked", "accepted")
+UNIT = re.compile(r"^U\d{2,3}$")
+STAMP_REF = re.compile(r"\(s:([0-9a-f]{4,})\)")
+ASSUMPTION = re.compile(r"^(assumed|assumed \(not retrieved\)|checked: .+)$")
+NOT_DRAFTS = {"README.md", "checks.md", "notes.md"}
+UNITS_COLS = ["unit", "where", "verdict", "review", "key", "note"]
+
+
+# ---------- git and stamps ----------
+
+def git(root: Path, *args: str) -> tuple[int, str]:
+    r = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True)
+    return r.returncode, r.stdout.strip()
+
+
+def blob(root: Path, rel: str, staged: bool) -> str | None:
+    if staged:
+        rc, out = git(root, "ls-files", "-s", "--", rel)
+        return out.split()[1] if rc == 0 and out else None
+    if not (root / rel).is_file():
+        return None
+    rc, out = git(root, "hash-object", "--", rel)
+    if rc == 0 and out:
+        return out
+    data = (root / rel).read_bytes()
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def stamps(root: Path) -> list[dict]:
+    rows, seen = [], set()
+    try:
+        lines = (root / ".gates" / "stamps.jsonl").read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return rows
+    for line in lines:
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(r, dict) and r.get("id") and r["id"] not in seen:
+            seen.add(r["id"])
+            rows.append(r)
+    return rows
+
+
+def find_stamp(all_stamps: list[dict], ref: str) -> dict | None:
+    hits = [s for s in all_stamps if str(s["id"]).startswith(ref)]
+    return hits[0] if len(hits) == 1 else None
+
+
+# ---------- the record file ----------
+
+def esc(cell: str) -> str:
+    return str(cell).replace("|", "\\|").replace("\n", " ")
+
+
+def split_row(line: str) -> list[str]:
+    cells = re.split(r"(?<!\\)\|", line.strip())[1:-1]
+    return [c.strip().replace("\\|", "|") for c in cells]
+
+
+class Record:
+    def __init__(self, text: str):
+        self.lines = text.splitlines()
+
+    def text(self) -> str:
+        return "\n".join(self.lines) + "\n"
+
+    def front(self) -> dict:
+        out: dict = {"checked-text": []}
+        if not self.lines or self.lines[0] != "---":
+            return out
+        for ln in self.lines[1:]:
+            if ln == "---":
+                break
+            m = re.match(r"^([\w-]+):\s*(.*?)\s*(?:#.*)?$", ln)
+            if m and m.group(1) != "checked-text":
+                out[m.group(1)] = m.group(2)
+            m = re.match(r"^\s+-\s+(.+?)\s+([0-9a-f]{16})\s*$", ln)
+            if m:
+                out["checked-text"].append((m.group(1), m.group(2)))
+        return out
+
+    def set_front(self, key: str, value: str) -> None:
+        end = self.lines.index("---", 1)
+        for i in range(1, end):
+            if re.match(rf"^{re.escape(key)}:", self.lines[i]):
+                self.lines[i] = f"{key}: {value}"
+                return
+        self.lines.insert(end, f"{key}: {value}")
+
+    def section(self, name: str) -> tuple[int, int]:
+        start = next((i for i, ln in enumerate(self.lines) if ln.strip() == f"## {name}"), None)
+        if start is None:
+            raise ValueError(f"no '## {name}' section")
+        end = next((i for i in range(start + 1, len(self.lines)) if self.lines[i].startswith("## ")),
+                   len(self.lines))
+        return start, end
+
+    def table(self, name: str) -> tuple[list[str], list[dict], int, int]:
+        start, end = self.section(name)
+        head = next((i for i in range(start, end) if self.lines[i].lstrip().startswith("|")), None)
+        if head is None:
+            raise ValueError(f"no table in '## {name}'")
+        cols = split_row(self.lines[head])
+        i = head + 2
+        rows = []
+        while i < end and self.lines[i].lstrip().startswith("|"):
+            cells = split_row(self.lines[i]) + [""] * len(cols)
+            rows.append(dict(zip(cols, cells)))
+            i += 1
+        return cols, rows, head + 2, i
+
+    def put_table(self, name: str, rows: list[dict]) -> None:
+        cols, _, a, b = self.table(name)
+        self.lines[a:b] = ["| " + " | ".join(esc(r.get(c, "")) for c in cols) + " |" for r in rows]
+
+
+# ---------- the document ----------
+
+class Doc:
+    def __init__(self, root: Path, slug: str):
+        self.root, self.slug = root, slug
+        self.rel = f"documents/{slug}"
+        self.folder = root / self.rel
+        try:
+            with open(self.folder / "document.toml", "rb") as f:
+                self.toml = tomllib.load(f)
+        except (OSError, tomllib.TOMLDecodeError):
+            self.toml = {}
+        src = self.toml.get("source", {})
+        self.external = src.get("external")
+        # Your own draft in the workspace is reviewed (and gated) as a file; anything else
+        # through unit files.
+        self.draft_mode = self.toml.get("whose") == "mine" and not self.external
+
+    def record_path(self) -> Path:
+        return self.folder / "checks.md"
+
+    def unit_rel(self, unit: str) -> str:
+        return f"{self.rel}/units/{unit}.md"
+
+    def drafts(self) -> list[str]:
+        return sorted(f"{self.rel}/{p.name}" for p in self.folder.iterdir()
+                      if p.is_file() and p.suffix in (".tex", ".md") and p.name not in NOT_DRAFTS)
+
+
+def load(doc: Doc, staged: bool = False) -> Record:
+    if staged:
+        rc, out = git(doc.root, "show", f":{doc.rel}/checks.md")
+        if rc == 0:
+            return Record(out)
+    return Record(doc.record_path().read_text(encoding="utf-8"))
+
+
+def counts(rec: Record) -> list[str]:
+    _, cov, _, _ = rec.table("Coverage")
+    _, units, _, _ = rec.table("Units")
+    _, assum, _, _ = rec.table("Assumptions")
+    made = sum(1 for r in cov if r.get("unit"))
+    v = {k: sum(1 for r in units if r.get("verdict") == k) for k in VERDICTS}
+    a = [r.get("status", "") for r in assum]
+    return [f"Coverage: {len(cov)} numbered result(s); {made} checked through units, "
+            f"{len(cov) - made} not made units (reasons in Coverage).",
+            f"Units: {len(units)}: {v['checked']} checked, {v['gap']} gap, "
+            f"{v['citation-missing']} citation-missing, {v['unclear']} unclear, {v['open']} open.",
+            f"Assumptions: {len(a)}: {sum(1 for s in a if s == 'assumed')} assumed, "
+            f"{sum(1 for s in a if s == 'assumed (not retrieved)')} not retrieved, "
+            f"{sum(1 for s in a if s.startswith('checked:'))} checked."]
+
+
+def summary_lines(rec: Record) -> list[str]:
+    start, end = rec.section("Summary")
+    return [ln for ln in rec.lines[start:end] if re.match(r"^(Coverage|Units|Assumptions): ", ln)]
+
+
+# ---------- verify ----------
+
+def verify(doc: Doc, staged: bool) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    try:
+        rec = load(doc, staged)
+        front = rec.front()
+        _, units, _, _ = rec.table("Units")
+        _, cov, _, _ = rec.table("Coverage")
+        _, assum, _, _ = rec.table("Assumptions")
+        rec.section("Summary")
+    except (OSError, ValueError) as e:
+        return [("FAIL", f"checks.md: {e}")]
+    status = front.get("status", "")
+    final = status in ("checked", "accepted")
+    if status not in STATUSES:
+        out.append(("FAIL", f"status must be one of {', '.join(STATUSES)}, not {status!r}"))
+    if not doc.toml:
+        out.append(("FAIL", "no readable document.toml"))
+    all_stamps = stamps(doc.root)
+    ids = [r.get("unit", "") for r in units]
+    for u in ids:
+        if not UNIT.match(u):
+            out.append(("FAIL", f"unit id {u!r}: use U01, U02, ..."))
+    for u in {u for u in ids if ids.count(u) > 1}:
+        out.append(("FAIL", f"unit {u} has more than one row"))
+    for r in units:
+        u, verdict = r.get("unit", ""), r.get("verdict", "")
+        where = f"unit {u}"
+        if verdict not in VERDICTS:
+            out.append(("FAIL", f"{where}: verdict {verdict!r} is not one of {', '.join(VERDICTS)}"))
+            continue
+        if verdict == "open":
+            if final:
+                out.append(("FAIL", f"{where} is open, but the record says {status}"))
+            continue
+        if verdict in NEEDS_NOTE and not r.get("note"):
+            out.append(("FAIL", f"{where}: a {verdict} row needs a note quoting the review"))
+        m = STAMP_REF.search(r.get("review", ""))
+        st = find_stamp(all_stamps, m.group(1)) if m else None
+        if not st:
+            out.append(("FAIL", f"{where}: its review names no stamp in .gates/stamps.jsonl "
+                                f"(fill rows with bin/checks set, not by hand)"))
+            continue
+        if st.get("gate") != "proof-referee":
+            out.append(("FAIL", f"{where}: backed by a {st.get('gate')} stamp; a unit's verdict is the proof-referee's"))
+        if bool(st.get("pass")) != (verdict == "checked"):
+            out.append(("FAIL", f"{where}: '{verdict}' but the stamp's verdict is {st.get('verdict')}"))
+        if r.get("key") != str(st.get("blob", ""))[:12]:
+            out.append(("FAIL", f"{where}: key {r.get('key')!r} is not the reviewed text's ({str(st.get('blob'))[:12]})"))
+        reviewed = st.get("path", "") if doc.draft_mode else doc.unit_rel(u)
+        if doc.draft_mode and (not reviewed.startswith(doc.rel + "/") or "/units/" in reviewed
+                               or "/source/" in reviewed):
+            out.append(("FAIL", f"{where}: the stamp is on {reviewed}, not on a draft of this document"))
+            continue
+        now = blob(doc.root, reviewed, staged)
+        if now is None:
+            out.append(("FAIL", f"{where}: {reviewed} is " + ("not staged" if staged else "missing")))
+        elif now != st.get("blob"):
+            out.append(("FAIL" if final else "WARN",
+                        f"{where}: {reviewed} changed after its review; review it again (bin/checks set)"))
+    if not doc.draft_mode:
+        unit_dir = doc.folder / "units"
+        files = {p.stem for p in unit_dir.glob("*.md")} if unit_dir.is_dir() else set()
+        for u in sorted(files - set(ids)):
+            out.append(("FAIL", f"units/{u}.md has no row in Units (bin/checks add)"))
+        for u in sorted(set(ids) - files):
+            out.append(("FAIL", f"unit {u} has no unit file units/{u}.md"))
+    for r in cov:
+        if not r.get("result"):
+            out.append(("FAIL", "a Coverage row names no result"))
+        if not r.get("unit") and not r.get("or why not"):
+            out.append(("FAIL", f"Coverage: {r.get('result')} has neither a unit nor a reason"))
+        if r.get("unit") and r["unit"] not in ids:
+            out.append(("FAIL", f"Coverage: {r.get('result')} names unit {r['unit']}, which has no row"))
+    for r in assum:
+        if not ASSUMPTION.match(r.get("status", "")):
+            out.append(("FAIL", f"Assumptions: {r.get('result')}: status must be 'assumed', "
+                                f"'assumed (not retrieved)' or 'checked: <where>'"))
+    if final:
+        if not cov:
+            out.append(("FAIL", f"the record says {status} but Coverage lists no results"))
+        if summary_lines(rec) != counts(rec):
+            out.append(("FAIL", "the Summary's counts do not match the tables (bin/checks summary)"))
+    if status == "accepted" and not front.get("accepted-by"):
+        out.append(("FAIL", "status accepted needs an accepted-by: line (the owner's name and date)"))
+    for path, h in front["checked-text"]:
+        p = Path(path).expanduser()
+        if not p.is_file():
+            out.append(("WARN", f"the checked text {path} is missing"))
+        elif hashlib.sha256(p.read_bytes()).hexdigest()[:16] != h:
+            out.append(("WARN", f"{path} changed since it was checked: re-extract and review the "
+                                f"units whose text changed"))
+    return out
+
+
+# ---------- commands ----------
+
+def die(msg: str) -> int:
+    print(f"FAIL  {msg}", file=sys.stderr)
+    return 1
+
+
+def need_record(doc: Doc) -> Record | None:
+    if not doc.record_path().is_file():
+        return None
+    return Record(doc.record_path().read_text(encoding="utf-8"))
+
+
+def cmd_init(root: Path, a) -> int:
+    doc = Doc(root, a.slug)
+    if not doc.toml:
+        return die(f"{doc.rel}/document.toml is missing or unreadable (bin/doc new first)")
+    if doc.record_path().exists():
+        return die(f"{doc.rel}/checks.md already exists")
+    text = (root / "docs" / "templates" / "check-record.md").read_text(encoding="utf-8")
+    rec = Record(text.replace("{title}", str(doc.toml.get("title", a.slug))))
+    if doc.external:
+        p = Path(doc.external).expanduser()
+        if not p.is_file():
+            return die(f"the external draft {doc.external} is missing")
+        end = rec.lines.index("---", 1)
+        rec.lines[end:end] = ["checked-text:",
+                              f"  - {doc.external} {hashlib.sha256(p.read_bytes()).hexdigest()[:16]}"]
+    doc.record_path().write_text(rec.text(), encoding="utf-8")
+    how = ("your draft is reviewed as a file" if doc.draft_mode else
+           f"write one unit file per result in {doc.rel}/units/")
+    print(f"PASS  wrote {doc.rel}/checks.md ({how})")
+    return 0
+
+
+def cmd_add(root: Path, a) -> int:
+    doc = Doc(root, a.slug)
+    rec = need_record(doc)
+    if rec is None:
+        return die(f"no {doc.rel}/checks.md (bin/checks init)")
+    if not UNIT.match(a.unit):
+        return die(f"unit id {a.unit!r}: use U01, U02, ...")
+    if not doc.draft_mode and not (root / doc.unit_rel(a.unit)).is_file():
+        return die(f"write the unit file {doc.unit_rel(a.unit)} first (Uses, Statement, Proof)")
+    _, rows, _, _ = rec.table("Units")
+    if any(r["unit"] == a.unit for r in rows):
+        return die(f"unit {a.unit} already has a row")
+    rows.append({"unit": a.unit, "where": a.where, "verdict": "open"})
+    rows.sort(key=lambda r: r["unit"])
+    rec.put_table("Units", rows)
+    doc.record_path().write_text(rec.text(), encoding="utf-8")
+    print(f"PASS  {a.unit} added ({a.where}), open")
+    return 0
+
+
+def fill(rec: Record, unit: str, st: dict, verdict: str, note: str, reused_from: str = "") -> None:
+    _, rows, _, _ = rec.table("Units")
+    for r in rows:
+        if r["unit"] == unit:
+            r["verdict"] = verdict
+            r["review"] = (f"reused from {reused_from}: " if reused_from else "") + \
+                f"{st['gate']} {st['verdict']} (s:{str(st['id'])[:8]})"
+            r["key"] = str(st["blob"])[:12]
+            r["note"] = note
+    rec.put_table("Units", rows)
+
+
+def cmd_set(root: Path, a) -> int:
+    doc = Doc(root, a.slug)
+    rec = need_record(doc)
+    if rec is None:
+        return die(f"no {doc.rel}/checks.md (bin/checks init)")
+    _, rows, _, _ = rec.table("Units")
+    if not any(r["unit"] == a.unit for r in rows):
+        return die(f"unit {a.unit} has no row (bin/checks add)")
+    if a.verdict not in VERDICTS:
+        return die(f"verdict must be one of {', '.join(VERDICTS)}")
+    if a.verdict == "open":
+        for r in rows:
+            if r["unit"] == a.unit:
+                r.update(verdict="open", review="", key="", note="")
+        rec.put_table("Units", rows)
+        doc.record_path().write_text(rec.text(), encoding="utf-8")
+        print(f"PASS  {a.unit} is open again")
+        return 0
+    if a.verdict in NEEDS_NOTE and not a.note:
+        return die(f"a {a.verdict} verdict needs --note quoting the review's hit")
+    if doc.draft_mode:
+        drafts = doc.drafts()
+        reviewed = a.file or (drafts[0] if len(drafts) == 1 else None)
+        if not reviewed:
+            return die(f"name the reviewed draft with --file (drafts here: {', '.join(drafts) or 'none'})")
+        reviewed = str(Path(reviewed)) if Path(reviewed).as_posix().startswith(doc.rel) else f"{doc.rel}/{reviewed}"
+    else:
+        reviewed = doc.unit_rel(a.unit)
+    now = blob(root, reviewed, staged=False)
+    if now is None:
+        return die(f"{reviewed} is missing")
+    cands = [s for s in stamps(root) if s.get("gate") == "proof-referee" and s.get("path") == reviewed
+             and s.get("blob") == now and (not a.stamp or str(s["id"]).startswith(a.stamp))]
+    if not cands:
+        return die(f"no proof-referee stamp on {reviewed} as it is now: dispatch the proof-referee "
+                   f"with {reviewed} named in its brief, then bin/gate-stamp proof-referee {reviewed} <VERDICT> -")
+    st = sorted(cands, key=lambda s: str(s.get("ts", "")))[-1]
+    if bool(st.get("pass")) != (a.verdict == "checked"):
+        return die(f"the latest proof-referee stamp says {st.get('verdict')}, which does not back "
+                   f"'{a.verdict}' (checked needs a passing verdict; the others a failing one)")
+    fill(rec, a.unit, st, a.verdict, a.note or "")
+    doc.record_path().write_text(rec.text(), encoding="utf-8")
+    print(f"PASS  {a.unit}: {a.verdict} ({st['verdict']}, s:{str(st['id'])[:8]})")
+    return 0
+
+
+def cmd_reuse(root: Path, a) -> int:
+    doc = Doc(root, a.slug)
+    rec = need_record(doc)
+    if rec is None:
+        return die(f"no {doc.rel}/checks.md (bin/checks init)")
+    if doc.draft_mode:
+        return die("reuse is for unit files; your own draft is reviewed as it stands")
+    rel = doc.unit_rel(a.unit)
+    now = blob(root, rel, staged=False)
+    if now is None:
+        return die(f"{rel} is missing")
+    cands = [s for s in stamps(root) if s.get("gate") == "proof-referee" and s.get("pass")
+             and s.get("blob") == now and s.get("path") != rel]
+    if not cands:
+        print(f"INFO  no passing review of identical content elsewhere: review {a.unit} (bin/checks set)")
+        return 1
+    st = sorted(cands, key=lambda s: str(s.get("ts", "")))[-1]
+    fill(rec, a.unit, st, "checked", "", reused_from=st["path"])
+    doc.record_path().write_text(rec.text(), encoding="utf-8")
+    print(f"PASS  {a.unit}: checked, reused from {st['path']} (s:{str(st['id'])[:8]})")
+    return 0
+
+
+def sections(text: str) -> dict[str, str]:
+    out, cur = {}, None
+    for ln in text.splitlines():
+        m = re.match(r"^##\s+(\w+)\s*$", ln)
+        if m:
+            cur = m.group(1).lower()
+            out[cur] = ""
+        elif cur:
+            out[cur] += ln + "\n"
+    return out
+
+
+def squash(text: str) -> str:
+    return " ".join(text.split())
+
+
+def fidelity(doc: Doc, unit: str) -> tuple[str, str]:
+    """(status, detail): is the unit's Statement and Proof, paragraph by paragraph, in source/?"""
+    texts = [p.read_text(errors="replace") for p in sorted((doc.folder / "source").rglob("*"))
+             if p.is_file() and p.suffix in (".tex", ".md", ".txt")] if (doc.folder / "source").is_dir() else []
+    if doc.external and Path(doc.external).expanduser().is_file():
+        texts.append(Path(doc.external).expanduser().read_text(errors="replace"))
+    if not texts:
+        return "INFO", "no LaTeX or text source to compare (a PDF?): the unit is a transcription; say so in its note"
+    src = squash("\n".join(texts))
+    try:
+        sec = sections((doc.root / doc.unit_rel(unit)).read_text(encoding="utf-8"))
+    except OSError:
+        return "FAIL", "no unit file"
+    missing = []
+    for name in ("statement", "proof"):
+        body = sec.get(name, "")
+        if not body.strip():
+            missing.append(f"its {name} is empty")
+        for para in re.split(r"\n\s*\n", body):
+            if para.strip() and squash(para) not in src:
+                missing.append(f"{name}: '{squash(para)[:70]}...' is not in source/ word for word")
+    return ("FAIL", "; ".join(missing)) if missing else ("PASS", "statement and proof are word for word in source/")
+
+
+def cmd_fidelity(root: Path, a) -> int:
+    doc = Doc(root, a.slug)
+    if doc.draft_mode:
+        return die("your own draft is reviewed as the draft file: there are no unit files to compare")
+    unit_dir = doc.folder / "units"
+    units = a.units or sorted(p.stem for p in unit_dir.glob("*.md")) if unit_dir.is_dir() else a.units
+    fails = 0
+    for u in units:
+        st, msg = fidelity(doc, u)
+        print(f"{st:4}  {u}: {msg}")
+        fails += st == "FAIL"
+    return 1 if fails else 0
+
+
+def cmd_summary(root: Path, a) -> int:
+    doc = Doc(root, a.slug)
+    rec = need_record(doc)
+    if rec is None:
+        return die(f"no {doc.rel}/checks.md (bin/checks init)")
+    start, end = rec.section("Summary")
+    keep = [i for i in range(start, end) if re.match(r"^(Coverage|Units|Assumptions): ", rec.lines[i])]
+    new = counts(rec)
+    if keep:
+        rec.lines[keep[0]:keep[-1] + 1] = new
+    else:
+        at = next((i + 1 for i in range(start, end) if rec.lines[i].rstrip().endswith("-->")), start + 1)
+        rec.lines[at:at] = [""] + new
+    doc.record_path().write_text(rec.text(), encoding="utf-8")
+    print("\n".join(new))
+    return 0
+
+
+def staged_records(root: Path) -> list[str]:
+    """Documents with a check record in the index and a staged change anywhere in their folder:
+    an edited draft or unit file is checked against its record, not only an edited record."""
+    rc, out = git(root, "diff", "--cached", "--name-only", "--diff-filter=ACMRD")
+    slugs = {m.group(1) for ln in out.splitlines() if (m := re.match(r"^documents/([^/]+)/", ln))}
+    return sorted(s for s in slugs if git(root, "ls-files", "--", f"documents/{s}/checks.md")[1])
+
+
+def cmd_verify(root: Path, a) -> int:
+    slugs = staged_records(root) if a.staged else (a.slugs or sorted(
+        p.parent.name for p in (root / "documents").glob("*/checks.md")))
+    fails = 0
+    for slug in slugs:
+        res = verify(Doc(root, slug), a.staged)
+        for status, msg in res:
+            print(f"{status:4}  documents/{slug}/checks.md: {msg}")
+            fails += status == "FAIL"
+        if not res:
+            print(f"PASS  documents/{slug}/checks.md")
+    if slugs or not a.staged:
+        print(f"checks verify: {len(slugs)} record(s), {fails} problem(s)")
+    return 1 if fails else 0
+
+
+def cmd_report(root: Path, a) -> int:
+    doc = Doc(root, a.slug)
+    rec = need_record(doc)
+    if rec is None:
+        return die(f"no {doc.rel}/checks.md")
+    front = rec.front()
+    _, units, _, _ = rec.table("Units")
+    _, cov, _, _ = rec.table("Coverage")
+    _, assum, _, _ = rec.table("Assumptions")
+    print(f"Check record: {doc.toml.get('title', a.slug)} ({doc.rel})")
+    print(f"Status: {front.get('status')}" + {"checked": " (checked by reviewers; not yet accepted by the owner)",
+                                             "accepted": f" (accepted by {front.get('accepted-by')})",
+                                             "open": " (checking in progress)"}.get(front.get("status", ""), ""))
+    print("\n".join(counts(rec)))
+    issues = [r for r in units if r.get("verdict") != "checked"]
+    if issues:
+        print("\nNot checked clean:")
+        for r in issues:
+            print(f"  {r['unit']} {r['where']}: {r['verdict']}" + (f": {r['note']}" if r.get("note") else ""))
+    skipped = [r for r in cov if not r.get("unit")]
+    if skipped:
+        print("\nNot made units:")
+        for r in skipped:
+            print(f"  {r['result']}: {r['or why not']}")
+    if assum:
+        print("\nAssumptions (cited results taken as the document quotes them unless checked):")
+        for r in assum:
+            print(f"  {r['result']} ({r['cited as']}), used by {r['used by']}: {r['status']}")
+    problems = [p for p in verify(doc, staged=False) if p[0] != "PASS"]
+    if problems:
+        print("\nRecord problems:")
+        for s, m in problems:
+            print(f"  {s}: {m}")
+    return 0
+
+
+def parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("init").add_argument("slug")
+    p = sub.add_parser("add")
+    p.add_argument("slug")
+    p.add_argument("unit")
+    p.add_argument("--where", required=True)
+    p = sub.add_parser("set")
+    p.add_argument("slug")
+    p.add_argument("unit")
+    p.add_argument("verdict")
+    p.add_argument("--note")
+    p.add_argument("--file")
+    p.add_argument("--stamp")
+    p = sub.add_parser("reuse")
+    p.add_argument("slug")
+    p.add_argument("unit")
+    p = sub.add_parser("fidelity")
+    p.add_argument("slug")
+    p.add_argument("units", nargs="*")
+    sub.add_parser("summary").add_argument("slug")
+    p = sub.add_parser("verify")
+    p.add_argument("slugs", nargs="*")
+    p.add_argument("--staged", action="store_true")
+    sub.add_parser("report").add_argument("slug")
+    return ap
+
+
+def run(root: Path, argv: list[str]) -> int:
+    a = parser().parse_args(argv)
+    return {"init": cmd_init, "add": cmd_add, "set": cmd_set, "reuse": cmd_reuse, "summary": cmd_summary,
+            "fidelity": cmd_fidelity,
+            "verify": cmd_verify, "report": cmd_report}[a.cmd](root, a)
+
+
+# ---------- selftest ----------
+
+def _selftest() -> list[str]:
+    bad: list[str] = []
+    with tempfile.TemporaryDirectory() as t:
+        root = Path(t)
+        (root / "docs" / "templates").mkdir(parents=True)
+        shutil.copy(ROOT / "docs" / "templates" / "check-record.md", root / "docs" / "templates")
+        g = lambda *x: git(root, *x)
+        g("init", "-q")
+        g("config", "user.name", "T")
+        g("config", "user.email", "t@invalid")
+
+        def doc(slug: str, toml: str) -> Path:
+            f = root / "documents" / slug
+            f.mkdir(parents=True)
+            (f / "document.toml").write_text(toml)
+            return f
+
+        n = [0]
+
+        def stamp(gate: str, path: str, verdict: str, passed: bool) -> str:
+            n[0] += 1
+            sid = f"{n[0]:04x}" + "ab" * 6
+            row = {"id": sid, "ts": f"2026-01-01T00:00:{n[0]:02d}", "gate": gate, "path": path,
+                   "blob": blob(root, path, False), "verdict": verdict, "pass": passed, "kind": "review"}
+            (root / ".gates").mkdir(exist_ok=True)
+            with open(root / ".gates" / "stamps.jsonl", "a") as fh:
+                fh.write(json.dumps(row) + "\n")
+            return sid
+
+        p = doc("paper", 'title = "A paper"\nwhose = "other"\n[source]\nfile = "/x"\n')
+        (p / "units").mkdir()
+        (p / "units" / "U01.md").write_text("## Uses\n\n## Statement\nA.\n\n## Proof\nB.\n")
+        (p / "units" / "U02.md").write_text("## Uses\n\n## Statement\nC.\n\n## Proof\nD.\n")
+        if run(root, ["init", "paper"]) != 0 or run(root, ["init", "paper"]) != 1:
+            bad.append("init writes checks.md once")
+        if run(root, ["add", "paper", "U03", "--where", "x"]) != 1:
+            bad.append("add needs the unit file")
+        run(root, ["add", "paper", "U02", "--where", "Lemma 2 | p. 3"])
+        run(root, ["add", "paper", "U01", "--where", "Lemma 1"])
+        vp = lambda: verify(Doc(root, "paper"), False)
+        if any(s == "FAIL" for s, _ in vp()):
+            bad.append(f"an open record with two open rows verifies: {vp()}")
+        if run(root, ["set", "paper", "U01", "checked"]) != 1:
+            bad.append("set without a stamp must be refused")
+        stamp("proof-referee", "documents/paper/units/U01.md", "CLEAN", True)
+        if run(root, ["set", "paper", "U01", "gap", "--note", "x"]) != 1:
+            bad.append("a passing stamp cannot back 'gap'")
+        if run(root, ["set", "paper", "U01", "checked"]) != 0:
+            bad.append("set U01 checked")
+        stamp("proof-referee", "documents/paper/units/U02.md", "NEEDS-WORK", False)
+        if run(root, ["set", "paper", "U02", "gap"]) != 1:
+            bad.append("a gap needs a note")
+        run(root, ["set", "paper", "U02", "gap", "--note", "step 3 uses n >= 5"])
+        rec = Record((p / "checks.md").read_text())
+        if rec.table("Units")[1][0]["where"] != "Lemma 1" or "Lemma 2 | p. 3" not in [r["where"] for r in rec.table("Units")[1]]:
+            bad.append("rows must be sorted and a '|' in a cell must survive")
+        rec.put_table("Coverage", [{"result": "Lemma 1", "unit": "U01"}, {"result": "Lemma 2", "unit": "U02"},
+                                   {"result": "Cor 3", "or why not": "immediate from Lemma 2"}])
+        rec.put_table("Assumptions", [{"result": "Zorn", "cited as": "[1]", "used by": "U02", "status": "assumed"}])
+        rec.set_front("status", "checked")
+        (p / "checks.md").write_text(rec.text())
+        if not any("Summary" in m for s, m in vp() if s == "FAIL"):
+            bad.append("status checked needs a matching summary")
+        run(root, ["summary", "paper"])
+        if any(s == "FAIL" for s, _ in vp()):
+            bad.append(f"a complete record must verify: {vp()}")
+        if "Units: 2: 1 checked, 1 gap, 0 citation-missing, 0 unclear, 0 open." not in (p / "checks.md").read_text():
+            bad.append("summary counts")
+        (p / "units" / "U01.md").write_text("## Uses\n\n## Statement\nA'.\n\n## Proof\nB.\n")
+        if not any("changed after its review" in m for s, m in vp() if s == "FAIL"):
+            bad.append("an edited unit file must fail a checked record")
+        (p / "units" / "U01.md").write_text("## Uses\n\n## Statement\nA.\n\n## Proof\nB.\n")
+        (p / "units" / "U04.md").write_text("x")
+        if not any("no row" in m for s, m in vp() if s == "FAIL"):
+            bad.append("a unit file without a row must fail")
+        (p / "units" / "U04.md").unlink()
+        rec = Record((p / "checks.md").read_text())
+        rec.set_front("status", "accepted")
+        (p / "checks.md").write_text(rec.text())
+        if not any("accepted-by" in m for s, m in vp() if s == "FAIL"):
+            bad.append("accepted needs accepted-by")
+        rec.set_front("accepted-by", "Ada, 2026-01-02")
+        (p / "checks.md").write_text(rec.text())
+        if any(s == "FAIL" for s, _ in vp()):
+            bad.append(f"an accepted record verifies: {vp()}")
+        text = (p / "checks.md").read_text()
+        forged = text.replace("| gap |", "| checked |", 1)
+        (p / "checks.md").write_text(forged)
+        if not any("stamp's verdict is NEEDS-WORK" in m for s, m in vp() if s == "FAIL"):
+            bad.append("a row claiming 'checked' over a failing stamp must fail")
+        (p / "checks.md").write_text(text)
+
+        # fidelity: the unit's statement and proof, word for word in source/
+        (p / "source").mkdir()
+        (p / "source" / "main.tex").write_text("Intro.\nA.\n\nB.\n\nC.\nD.\n")
+        if fidelity(Doc(root, "paper"), "U01")[0] != "PASS":
+            bad.append(f"fidelity: a verbatim unit passes: {fidelity(Doc(root, 'paper'), 'U01')}")
+        (p / "units" / "U09.md").write_text("## Statement\nA, for all n.\n\n## Proof\nB.\n")
+        if fidelity(Doc(root, "paper"), "U09")[0] != "FAIL":
+            bad.append("fidelity: an altered statement must fail")
+        (p / "units" / "U09.md").unlink()
+
+        # reuse: identical unit text in another document
+        q = doc("other", 'title = "B"\nwhose = "other"\n')
+        (q / "units").mkdir()
+        shutil.copy(p / "units" / "U01.md", q / "units" / "U01.md")
+        run(root, ["init", "other"])
+        run(root, ["add", "other", "U01", "--where", "Prop 7"])
+        if run(root, ["reuse", "other", "U01"]) != 0 or any(s == "FAIL" for s, _ in verify(Doc(root, "other"), False)):
+            bad.append("reuse of identical content must fill a valid row")
+        if "reused from documents/paper/units/U01.md" not in (q / "checks.md").read_text():
+            bad.append("a reused row names where it was reviewed")
+
+        # your own draft: stamps on the draft file
+        d = doc("mine", 'title = "Notes"\nwhose = "mine"\n[source]\n')
+        (d / "notes.tex").write_text("\\begin{proof}x\\end{proof}\n")
+        run(root, ["init", "mine"])
+        run(root, ["add", "mine", "U01", "--where", "Lemma 1 in notes.tex"])
+        stamp("proof-referee", "documents/mine/notes.tex", "CLEAN-MINOR", True)
+        if run(root, ["set", "mine", "U01", "checked"]) != 0 or any(s == "FAIL" for s, _ in verify(Doc(root, "mine"), False)):
+            bad.append("a draft row backed by the draft's stamp")
+        (d / "notes.tex").write_text("\\begin{proof}y\\end{proof}\n")
+        if not any(s == "WARN" and "changed after" in m for s, m in verify(Doc(root, "mine"), False)):
+            bad.append("an edited draft makes its rows stale (a warning while open)")
+
+        # --staged reads the index, not the working tree
+        (d / "notes.tex").write_text("\\begin{proof}x\\end{proof}\n")
+        g("add", "-A")
+        (d / "notes.tex").write_text("\\begin{proof}z\\end{proof}\n")
+        if any(s != "PASS" for s, _ in verify(Doc(root, "mine"), True)):
+            bad.append(f"--staged must check the staged draft: {verify(Doc(root, 'mine'), True)}")
+        if staged_records(root) != ["mine", "other", "paper"]:
+            bad.append(f"staged records: {staged_records(root)}")
+        g("commit", "-qm", "records")
+        rec = Record((d / "checks.md").read_text())
+        rec.put_table("Coverage", [{"result": "Lemma 1", "unit": "U01"}])
+        rec.set_front("status", "checked")
+        (d / "checks.md").write_text(rec.text())
+        run(root, ["summary", "mine"])
+        g("add", "-A")
+        g("commit", "-qm", "checked")
+        (d / "notes.tex").write_text("\\begin{proof}w\\end{proof}\n")
+        g("add", str(d / "notes.tex"))
+        if staged_records(root) != ["mine"] or not any("changed after" in m for s, m in verify(Doc(root, "mine"), True) if s == "FAIL"):
+            bad.append("editing a draft under a checked record must fail its staged verify")
+        g("reset", "-q")
+
+        # a draft kept outside the workspace: unit files, and checked-text
+        ext = root / "elsewhere dir" / "my draft.tex"
+        ext.parent.mkdir()
+        ext.write_text("x")
+        e = doc("ext", f'title = "E"\nwhose = "mine"\n[source]\nexternal = "{ext}"\n')
+        if run(root, ["init", "ext"]) != 0 or Doc(root, "ext").draft_mode:
+            bad.append("an external draft is checked through unit files")
+        if Record((e / "checks.md").read_text()).front()["checked-text"] != [(str(ext), hashlib.sha256(b"x").hexdigest()[:16])]:
+            bad.append(f"checked-text (a path with spaces): {Record((e / 'checks.md').read_text()).front()}")
+        if any(s != "PASS" for s, _ in verify(Doc(root, "ext"), False)):
+            bad.append(f"a fresh external record verifies: {verify(Doc(root, 'ext'), False)}")
+        ext.write_text("y")
+        if not any(s == "WARN" and "changed since" in m for s, m in verify(Doc(root, "ext"), False)):
+            bad.append("an edited external draft warns")
+    return bad
+
+
+def selftest() -> int:
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        bad = _selftest()
+    for b in bad:
+        print("SELFTEST FAIL", b)
+    print(f"checks selftest: {'ok' if not bad else f'{len(bad)} failed'}")
+    return 1 if bad else 0
+
+
+def main() -> int:
+    if sys.argv[1:] == ["--selftest"]:
+        return selftest()
+    return run(ROOT, sys.argv[1:])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

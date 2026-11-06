@@ -1,0 +1,510 @@
+#!/usr/bin/env python3
+"""Document folders: make one, fetch its text, check them all, list them.
+
+selftest: yes
+
+  bin/doc new <slug> --title "<title>" --whose mine|other [SOURCE] [--local-source] [--no-fetch]
+      SOURCE is at most one of:
+        --arxiv <id>       an arXiv paper (its LaTeX source if it has one, else its PDF)
+        --url <url>        a file on the web
+        --file <path>      a file on this computer, copied into source/
+        --external <path>  your own draft kept outside the workspace: recorded, not copied
+      Makes documents/<slug>/ from documents/TEMPLATE/, writes its document.toml, adds its
+      row to documents/_index.md and fetches the text into source/.
+  bin/doc fetch <slug> [--accept]
+      Fetch the text again (a fresh clone has no local copy). Records a SHA-256 hash of each
+      file the first time; later, a file whose text differs is reported and the record kept,
+      unless --accept records the new text.
+  bin/doc check [<slug> ...]     validate document folders; exit 1 on a FAIL
+  bin/doc list                   one line per document
+  bin/doc --selftest
+
+source/ is committed like everything else, so the workspace holds copies of other authors'
+work: keep its remote private. --local-source keeps one document's text out of the history
+(a local copy git ignores; bin/doc fetch brings it back). Rules: docs/discipline/documents.md.
+"""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import datetime
+import gzip
+import hashlib
+import io
+import re
+import shutil
+import sys
+import tarfile
+import tempfile
+import tomllib
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path, PurePosixPath
+
+ROOT = Path(__file__).resolve().parent.parent
+SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+KINDS = ("arxiv", "url", "file", "external")
+ARXIV = re.compile(r"^(\d{4}\.\d{4,5}|[a-z-]+(\.[A-Z]{2})?/\d{7})(v\d+)?$")
+IGNORE_ALL = "*\n!.gitignore\n"
+UA = "math-io bin/doc (document fetch)"
+
+
+def download(url: str) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    with urllib.request.urlopen(req, timeout=120) as r:
+        return r.read()
+
+
+def today() -> str:
+    return datetime.date.today().isoformat()
+
+
+def q(s: str) -> str:
+    return '"' + str(s).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def write_toml(path: Path, d: dict) -> None:
+    src = d.get("source", {})
+    lines = [f"title = {q(d['title'])}",
+             "# mine: your own writing; other: someone else's (docs/discipline/documents.md)",
+             f"whose = {q(d['whose'])}", "", "[source]",
+             "# Where the text comes from: at most one of arxiv, url, file (copied into source/),",
+             "# external (your draft kept outside the workspace, recorded but not copied)."]
+    for k in KINDS:
+        if src.get(k):
+            lines.append(f"{k} = {q(src[k])}")
+    lines += ["# true: source/ is committed; false: a local copy git ignores (bin/doc fetch brings it back)",
+              f"commit = {'true' if src.get('commit', True) else 'false'}"]
+    for f in sorted(src.get("files", []), key=lambda f: f["path"]):
+        lines += ["", "[[source.files]]", f"path = {q(f['path'])}", f"sha256 = {q(f['sha256'])}",
+                  f"accessed = {q(f['accessed'])}"]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def read_toml(folder: Path) -> dict:
+    with open(folder / "document.toml", "rb") as f:
+        return tomllib.load(f)
+
+
+def sha256(p: Path) -> str:
+    return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+def safe_name(name: str) -> PurePosixPath | None:
+    p = PurePosixPath(name)
+    if p.is_absolute() or not p.parts or any(part in ("..", "") for part in p.parts):
+        return None
+    return p
+
+
+def unpack(data: bytes, dest: Path, stem: str) -> tuple[list[str], list[str]]:
+    """Write an arXiv e-print (tar.gz, gzip'd file, or PDF) into dest. Returns (written, refused)."""
+    written, refused = [], []
+    try:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as tar:
+            for m in tar.getmembers():
+                rel = safe_name(m.name)
+                if m.isdir():
+                    continue
+                if rel is None or not m.isfile():
+                    refused.append(m.name)
+                    continue
+                out = dest / rel
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(tar.extractfile(m).read())
+                written.append(rel.as_posix())
+        return written, refused
+    except tarfile.TarError:
+        pass
+    try:
+        data = gzip.decompress(data)
+    except OSError:
+        pass
+    name = f"{stem}.pdf" if data[:5] == b"%PDF-" else f"{stem}.tex"
+    (dest / name).write_bytes(data)
+    return [name], refused
+
+
+def offline(root: Path) -> bool:
+    try:
+        with open(root / "project.toml", "rb") as f:
+            return bool(tomllib.load(f).get("web", {}).get("offline", False))
+    except (OSError, tomllib.TOMLDecodeError):
+        return False
+
+
+def fetch_text(folder: Path, d: dict) -> tuple[list[str], list[str]]:
+    """Fetch the document's text into source/. Returns (messages, problems)."""
+    src, dest = d.get("source", {}), folder / "source"
+    msgs, probs = [], []
+    if src.get("external"):
+        return [f"external draft at {src['external']}: nothing to fetch"], []
+    if not any(src.get(k) for k in ("arxiv", "url", "file")):
+        return ["no source to fetch"], []
+    if (src.get("arxiv") or src.get("url")) and offline(folder.parent.parent):
+        return [], ["the workspace is offline ([web] offline in project.toml), so nothing is "
+                    "downloaded: get the file another way and use --file, or ask the owner"]
+    dest.mkdir(exist_ok=True)
+    try:
+        if src.get("arxiv"):
+            aid = src["arxiv"]
+            stem = aid.replace("/", "_")
+            try:
+                data = download(f"https://arxiv.org/e-print/{aid}")
+            except urllib.error.HTTPError:
+                data = download(f"https://arxiv.org/pdf/{aid}")
+            written, refused = unpack(data, dest, stem)
+            msgs.append(f"arXiv {aid}: {len(written)} file(s)")
+            for r in refused:
+                probs.append(f"refused an unsafe archive member (absolute path, '..' or link): {r}")
+        elif src.get("url"):
+            name = PurePosixPath(urllib.parse.urlparse(src["url"]).path).name or "download"
+            (dest / name).write_bytes(download(src["url"]))
+            msgs.append(f"{src['url']}: {name}")
+        else:
+            p = Path(src["file"]).expanduser()
+            shutil.copyfile(p, dest / p.name)
+            msgs.append(f"copied {p} to source/{p.name}")
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        probs.append(f"could not fetch the text ({e}). Without a network (or in a sandbox that "
+                     "blocks it), download the file yourself and use --file, or run bin/doc "
+                     "fetch again later")
+    return msgs, probs
+
+
+def present(folder: Path) -> dict[str, str]:
+    dest = folder / "source"
+    if not dest.is_dir():
+        return {}
+    return {p.relative_to(dest).as_posix(): sha256(p) for p in sorted(dest.rglob("*"))
+            if p.is_file() and p.name != ".gitignore"}
+
+
+def record(folder: Path, d: dict, accept: bool) -> list[tuple[str, str]]:
+    """Compare source/ with the recorded hashes; record them if none (or --accept)."""
+    src = d.setdefault("source", {})
+    have, old = present(folder), {f["path"]: f for f in src.get("files", [])}
+    out = []
+    if not old or accept:
+        src["files"] = [{"path": p, "sha256": h,
+                         "accessed": old[p]["accessed"] if p in old and old[p]["sha256"] == h else today()}
+                        for p, h in have.items()]
+        write_toml(folder / "document.toml", d)
+        if have:
+            out.append(("PASS", f"recorded {len(have)} file(s) in document.toml"))
+        return out
+    changed = [p for p in old if p in have and have[p] != old[p]["sha256"]]
+    missing = [p for p in old if p not in have]
+    added = [p for p in have if p not in old]
+    if changed or added:
+        out.append(("WARN", f"the text differs from the one recorded (changed: {', '.join(changed) or 'none'}; "
+                    f"new: {', '.join(added) or 'none'}). A newer version upstream? Pin one "
+                    "(an arXiv id with v<n>), or run bin/doc fetch --accept to record this text"))
+    if missing:
+        out.append(("INFO", f"{len(missing)} recorded file(s) not here (a fresh clone?): bin/doc fetch {folder.name}"))
+    if not (changed or added or missing):
+        out.append(("PASS", "source/ matches the recorded hashes"))
+    return out
+
+
+def ensure_ignore(folder: Path, d: dict) -> None:
+    gi = folder / "source" / ".gitignore"
+    if not d.get("source", {}).get("commit", True):
+        gi.parent.mkdir(exist_ok=True)
+        gi.write_text(IGNORE_ALL)
+    elif gi.exists() and gi.read_text() == IGNORE_ALL:
+        gi.unlink()
+
+
+def cmd_new(root: Path, a) -> int:
+    if not SLUG.match(a.slug) or a.slug == "TEMPLATE":
+        print(f"FAIL  slug {a.slug!r}: use lower-case letters, digits and hyphens", file=sys.stderr)
+        return 1
+    folder = root / "documents" / a.slug
+    if folder.exists():
+        print(f"FAIL  documents/{a.slug}/ already exists", file=sys.stderr)
+        return 1
+    given = [k for k in KINDS if getattr(a, k)]
+    if len(given) > 1:
+        print(f"FAIL  give at most one source; got {', '.join('--' + k for k in given)}", file=sys.stderr)
+        return 1
+    if a.arxiv and not ARXIV.match(a.arxiv):
+        print(f"FAIL  {a.arxiv!r} is not an arXiv id (like 2401.01234 or 2401.01234v2)", file=sys.stderr)
+        return 1
+    for k in ("file", "external"):
+        v = getattr(a, k)
+        if v and not Path(v).expanduser().exists():
+            print(f"FAIL  --{k} {v}: no such file", file=sys.stderr)
+            return 1
+    shutil.copytree(root / "documents" / "TEMPLATE", folder)
+    readme = folder / "README.md"
+    readme.write_text(readme.read_text(encoding="utf-8").replace("started: YYYY-MM-DD", f"started: {today()}", 1),
+                      encoding="utf-8")
+    src: dict = {"commit": not a.local_source}
+    for k in KINDS:
+        v = getattr(a, k)
+        if v:
+            src[k] = str(Path(v).expanduser().resolve()) if k in ("file", "external") else v
+    d = {"title": " ".join(a.title.split()), "whose": a.whose, "source": src}
+    write_toml(folder / "document.toml", d)
+    ensure_ignore(folder, d)
+    index = root / "documents" / "_index.md"
+    text = index.read_text(encoding="utf-8")
+    title = d["title"].replace("|", "\\|")
+    index.write_text(text.rstrip("\n") + f"\n| [{a.slug}]({a.slug}/README.md) | {title} | {a.whose} | active | |\n",
+                     encoding="utf-8")
+    print(f"PASS  made documents/{a.slug}/ ({a.whose}) and its row in documents/_index.md")
+    status = 0
+    if not a.no_fetch and any(src.get(k) for k in ("arxiv", "url", "file")):
+        status = cmd_fetch(root, argparse.Namespace(slug=a.slug, accept=False))
+    print(f"Next: fill in documents/{a.slug}/README.md (what this work is for, the first step).")
+    return status
+
+
+def cmd_fetch(root: Path, a) -> int:
+    folder = root / "documents" / a.slug
+    try:
+        d = read_toml(folder)
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        print(f"FAIL  documents/{a.slug}/document.toml: {e}", file=sys.stderr)
+        return 1
+    msgs, probs = fetch_text(folder, d)
+    for m in msgs:
+        print(f"PASS  {m}")
+    for p in probs:
+        print(f"FAIL  {p}")
+    if probs and not present(folder):
+        return 1
+    ensure_ignore(folder, d)
+    for status, m in record(folder, d, a.accept):
+        print(f"{status:4}  {m}")
+    return 1 if probs else 0
+
+
+def check_one(root: Path, folder: Path) -> list[tuple[str, str]]:
+    out = []
+    try:
+        d = read_toml(folder)
+    except FileNotFoundError:
+        return [("FAIL", "no document.toml (make folders with bin/doc new)")]
+    except tomllib.TOMLDecodeError as e:
+        return [("FAIL", f"document.toml does not parse: {e}")]
+    if not str(d.get("title", "")).strip():
+        out.append(("FAIL", "document.toml has no title"))
+    if d.get("whose") not in ("mine", "other"):
+        out.append(("FAIL", f"whose must be \"mine\" or \"other\", not {d.get('whose')!r}"))
+        return out
+    src = d.get("source", {})
+    given = [k for k in KINDS if src.get(k)]
+    if len(given) > 1:
+        out.append(("FAIL", f"[source] gives more than one of {', '.join(KINDS)}: {', '.join(given)}"))
+    if src.get("external") and not Path(src["external"]).expanduser().exists():
+        out.append(("WARN", f"the external draft is not at {src['external']} (moved? update [source] external)"))
+    gi = folder / "source" / ".gitignore"
+    if not src.get("commit", True) and (folder / "source").is_dir() and not gi.exists():
+        out.append(("FAIL", "[source] commit = false, but source/.gitignore is missing, so the text "
+                    "would be committed (run bin/doc fetch to restore it)"))
+    if src.get("files"):
+        out += record(folder, d, accept=False)
+    if not out:
+        out.append(("PASS", "ok"))
+    return out
+
+
+def documents(root: Path, slugs: list[str]) -> list[Path]:
+    base = root / "documents"
+    if slugs:
+        return [base / s for s in slugs]
+    return [p for p in sorted(base.iterdir()) if p.is_dir() and p.name != "TEMPLATE"] if base.is_dir() else []
+
+
+def cmd_check(root: Path, a) -> int:
+    fails = 0
+    folders = documents(root, a.slugs)
+    for folder in folders:
+        if not folder.is_dir():
+            print(f"FAIL  documents/{folder.name}/: no such folder")
+            fails += 1
+            continue
+        for status, m in check_one(root, folder):
+            print(f"{status:4}  documents/{folder.name}/: {m}")
+            fails += status == "FAIL"
+    print(f"\ndoc check: {len(folders)} document(s), {fails} failed")
+    return 1 if fails else 0
+
+
+def cmd_list(root: Path, a) -> int:
+    rows = []
+    for folder in documents(root, []):
+        try:
+            d = read_toml(folder)
+        except (OSError, tomllib.TOMLDecodeError):
+            d = {}
+        m = re.search(r"^status:\s*(\S+)", (folder / "README.md").read_text(encoding="utf-8")
+                      if (folder / "README.md").exists() else "", re.M)
+        kind = next((k for k in KINDS if d.get("source", {}).get(k)), "written here")
+        rows.append((folder.name, str(d.get("whose", "?")), m.group(1) if m else "?", kind,
+                     str(d.get("title", "?"))))
+    if not rows:
+        print("no documents yet: bin/doc new <slug> --title \"...\" --whose mine|other")
+        return 0
+    w = [max(len(r[i]) for r in rows) for i in range(4)]
+    for r in rows:
+        print("  ".join(r[i].ljust(w[i]) for i in range(4)) + "  " + r[4])
+    return 0
+
+
+def parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--selftest", action="store_true")
+    sub = ap.add_subparsers(dest="cmd")
+    n = sub.add_parser("new")
+    n.add_argument("slug")
+    n.add_argument("--title", required=True)
+    n.add_argument("--whose", required=True, choices=("mine", "other"))
+    for k in KINDS:
+        n.add_argument(f"--{k}")
+    n.add_argument("--local-source", action="store_true")
+    n.add_argument("--no-fetch", action="store_true")
+    f = sub.add_parser("fetch")
+    f.add_argument("slug")
+    f.add_argument("--accept", action="store_true")
+    c = sub.add_parser("check")
+    c.add_argument("slugs", nargs="*")
+    sub.add_parser("list")
+    return ap
+
+
+def run(root: Path, argv: list[str]) -> int:
+    a = parser().parse_args(argv)
+    return {"new": cmd_new, "fetch": cmd_fetch, "check": cmd_check, "list": cmd_list}[a.cmd](root, a)
+
+
+def selftest() -> int:
+    global download
+    bad: list[str] = []
+    real = download
+    with tempfile.TemporaryDirectory() as t, contextlib.redirect_stdout(io.StringIO()), \
+            contextlib.redirect_stderr(io.StringIO()):
+        root = Path(t)
+        shutil.copytree(ROOT / "documents" / "TEMPLATE", root / "documents" / "TEMPLATE")
+        (root / "documents" / "_index.md").write_text("| folder | title | whose | status | what |\n|---|---|---|---|---|\n")
+        paper = root / "paper.pdf"
+        paper.write_bytes(b"%PDF-1.4 a paper")
+
+        if run(root, ["new", "Bad_Slug", "--title", "x", "--whose", "other"]) != 1:
+            bad.append("an invalid slug must be refused")
+        if run(root, ["new", "p", "--title", "A | paper", "--whose", "other", "--file", str(paper)]) != 0:
+            bad.append("new --file failed")
+        f = root / "documents" / "p"
+        d = read_toml(f)
+        if d["whose"] != "other" or d["source"]["files"][0]["path"] != "paper.pdf" \
+                or d["source"]["files"][0]["sha256"] != sha256(paper):
+            bad.append(f"new --file: wrong record {d}")
+        if (f / "source" / ".gitignore").exists() or read_toml(f)["source"]["commit"] is not True:
+            bad.append("source/ is committed by default, someone else's too")
+        if "| [p](p/README.md) | A \\| paper | other | active | |" not in (root / "documents" / "_index.md").read_text():
+            bad.append("new must add an index row (with | escaped)")
+        if "started: YYYY-MM-DD" in (f / "README.md").read_text():
+            bad.append("new must fill in the start date")
+        if run(root, ["new", "p", "--title", "x", "--whose", "other"]) != 1:
+            bad.append("an existing folder must be refused")
+        if run(root, ["new", "q", "--title", "x", "--whose", "mine", "--url", "u", "--arxiv", "2401.00001"]) != 1:
+            bad.append("two sources must be refused")
+        if run(root, ["check"]) != 0:
+            bad.append("a fresh document must check clean")
+
+        (f / "source" / "paper.pdf").write_bytes(b"%PDF-1.4 edited")
+        if not any(s == "WARN" for s, _ in check_one(root, f)):
+            bad.append("an edited source file must warn")
+        if run(root, ["fetch", "p"]) != 0 or read_toml(f)["source"]["files"][0]["sha256"] != sha256(paper):
+            bad.append("fetch restores the copy and keeps the record")
+        run(root, ["new", "loc", "--title", "x", "--whose", "other", "--file", str(paper), "--local-source"])
+        fl = root / "documents" / "loc"
+        if (fl / "source" / ".gitignore").read_text() != IGNORE_ALL or read_toml(fl)["source"]["commit"] is not False:
+            bad.append("--local-source must git-ignore source/ and record commit = false")
+        (fl / "source" / ".gitignore").unlink()
+        if not any(s == "FAIL" for s, _ in check_one(root, fl)):
+            bad.append("commit = false without source/.gitignore must fail")
+        run(root, ["fetch", "loc"])
+        if not (fl / "source" / ".gitignore").exists():
+            bad.append("fetch must restore source/.gitignore for a local source")
+
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            for name, body in (("main.tex", b"\\begin{proof}x\\end{proof}"), ("../evil.tex", b"x"),
+                               ("sub/fig.tex", b"y")):
+                info = tarfile.TarInfo(name)
+                info.size = len(body)
+                tar.addfile(info, io.BytesIO(body))
+            link = tarfile.TarInfo("link")
+            link.type, link.linkname = tarfile.SYMTYPE, "/etc/passwd"
+            tar.addfile(link)
+        served = {"https://arxiv.org/e-print/2401.00001": buf.getvalue()}
+
+        def fake(url: str) -> bytes:
+            if url not in served:
+                raise urllib.error.HTTPError(url, 404, "not found", None, None)
+            return served[url]
+        download = fake
+        if run(root, ["new", "ax", "--title", "x", "--whose", "other", "--arxiv", "2401.00001"]) == 0:
+            bad.append("an archive with unsafe members must report them")
+        fx = root / "documents" / "ax" / "source"
+        if not (fx / "main.tex").exists() or not (fx / "sub" / "fig.tex").exists():
+            bad.append("arXiv tar: safe members must be written")
+        if (root / "documents" / "ax" / "evil.tex").exists() or (fx / "link").exists():
+            bad.append("arXiv tar: '..' and link members must be refused")
+        served["https://arxiv.org/e-print/2402.00002"] = gzip.compress(b"\\documentclass{article}")
+        run(root, ["new", "gz", "--title", "x", "--whose", "mine", "--arxiv", "2402.00002"])
+        if not (root / "documents" / "gz" / "source" / "2402.00002.tex").exists():
+            bad.append("arXiv gzip'd single file must become <id>.tex")
+        served["https://arxiv.org/pdf/2403.00003"] = b"%PDF-1.5 only a pdf"
+        run(root, ["new", "pdf", "--title", "x", "--whose", "other", "--arxiv", "2403.00003"])
+        if not (root / "documents" / "pdf" / "source" / "2403.00003.pdf").exists():
+            bad.append("no e-print: fall back to the PDF")
+        served["https://arxiv.org/pdf/2403.00003"] = b"%PDF-1.5 a new version"
+        run(root, ["fetch", "pdf"])
+        old = read_toml(root / "documents" / "pdf")["source"]["files"][0]["sha256"]
+        if old != hashlib.sha256(b"%PDF-1.5 only a pdf").hexdigest():
+            bad.append("a changed upstream text must not overwrite the record without --accept")
+        run(root, ["fetch", "pdf", "--accept"])
+        if read_toml(root / "documents" / "pdf")["source"]["files"][0]["sha256"] == old:
+            bad.append("--accept must record the new text")
+
+        (root / "project.toml").write_text("[web]\noffline = true\n")
+        served["https://arxiv.org/e-print/2404.00004"] = gzip.compress(b"x")
+        if run(root, ["new", "off", "--title", "x", "--whose", "other", "--arxiv", "2404.00004"]) == 0 \
+                or (root / "documents" / "off" / "source" / "2404.00004.tex").exists():
+            bad.append("offline: no download")
+        (root / "project.toml").unlink()
+
+        draft = root / "elsewhere.tex"
+        draft.write_text("x")
+        run(root, ["new", "mine", "--title", "x", "--whose", "mine", "--external", str(draft)])
+        draft.unlink()
+        if not any(s == "WARN" for s, _ in check_one(root, root / "documents" / "mine")):
+            bad.append("a missing external draft must warn")
+        if (root / "documents" / "mine" / "source").exists():
+            bad.append("an external draft is not copied")
+        (root / "documents" / "broken").mkdir()
+        if run(root, ["check"]) != 1:
+            bad.append("a folder without document.toml must fail the check")
+    download = real
+    for b in bad:
+        print("SELFTEST FAIL", b)
+    print(f"doc selftest: {'ok' if not bad else f'{len(bad)} failed'}")
+    return 1 if bad else 0
+
+
+def main() -> int:
+    if "--selftest" in sys.argv[1:]:
+        return selftest()
+    if len(sys.argv) < 2:
+        parser().print_help()
+        return 2
+    return run(ROOT, sys.argv[1:])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

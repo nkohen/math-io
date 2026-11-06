@@ -1,0 +1,127 @@
+# math-io — workspace settings, read by bin/ scripts and hooks. This file is yours to edit.
+
+[project]
+name = "math-io"
+# Your name, as the agents address you. bin/setup asks for it on the first run.
+owner = "the owner"
+# The agent program this copy of math-io is laid out for; bin/doctor reads it.
+harness = "claude"
+
+[tiers]
+# Which model plays each role. Reviewers must never run on a weaker model than the author
+# of what they review. Recorded at init: the main thread's model (`.claude/settings.json`) and
+# each agent file's model were set from these, and
+# only bin/usage-report reads this table later (to label models by tier). To change a model, edit those files (`.claude/agents/*.md`, `model:`).
+strong = "opus"
+worker = "sonnet"
+
+[field_profile]
+# How the mathematics in this workspace behaves; read by agents at the deep-core gate
+# (docs/discipline/stopping.md). A document may override small_cases_informative with
+# `small-cases: informative | not-informative` in its frontmatter.
+# false where small instances say little about the claim (an estimate that only bites for
+# large parameters, a phenomenon that starts beyond computable range).
+small_cases_informative = true
+# true when the work is mostly building objects that meet criteria (a construction, a
+# counterexample, a protocol) rather than proving statements about given ones.
+construction = false
+
+[stack]
+# Programs you use (e.g. "PARI/GP"); bin/define-check treats their names as known words.
+tools = []
+# Watched commands: programs whose failures the reflection loop should notice (leading
+# command word). None at first.
+research_commands = []
+
+# Output patterns that mean a watched command failed even if it exited 0. Started from
+# the standard patterns for the tools above; add one when a run fails in a way they miss.
+
+[arguments]
+# Labels for an argued claim (docs/discipline/informal-arguments.md, "Labels"): what kind of
+# support it has. Combined with " + ". Read by bin/hedge-scan. Add your field's own kinds
+# here; model-only takes the model in parentheses, analogy (relay: ...) what transfers.
+labels = ["heuristic", "moral", "conditional", "model-only", "analogy"]
+
+[hygiene]
+# House rules for proofs in this field, used by bin/math-hygiene-scan and the proof-referee.
+# A plain sentence is a checklist item for the reviewer. An entry of the form
+# 're:<regex> :: <message>' is also applied mechanically to every line of a document.
+rules = [
+]
+
+[scans]
+# Tokens bin/define-check should treat as standard notation in this field (e.g. "E8", "S3").
+define_ok = []
+
+[gates]
+# The commit gate (.githooks/pre-commit). See docs/discipline/commit-gate.md.
+enabled = true
+# "always": refuse every commit that lacks a required review. "once": refuse the first
+# time for a given set of problems and let an identical retry through.
+refuse = "always"
+# A passing stamp whose excerpt matches one of these (regexes, whole words, any case) is
+# refused unless --caveat-ok quotes the line. Left out on purpose: "gap" alone and
+# "conditional on", which in passing reports are usually the mathematical noun and a cited
+# conditional-on: line.
+caveat_phrases = ['sketch(ed)?', 'not (yet )?(verified|certified|checked|proved)', 'unproved', 'incorrect', 'from memory', 'open gap', 'gap remains', 'not rigorous']
+
+[gates.verdicts]
+# Reviewer = the verdicts that count as passing; only these satisfy the commit gate.
+# bin/gate-stamp records the failing ones too ([gates.failing]) as review history.
+claim-auditor = ["SOUND"]
+proof-referee = ["CLEAN", "CLEAN-MINOR"]
+red-team = ["SURVIVED"]
+cold-reader = ["SELF-CONTAINED", "SELF-CONTAINED-MINOR"]
+expositor = ["READER-READY"]
+provenance = ["ATTRIBUTION-CLEAN"]
+
+[gates.failing]
+# Reviewer = its non-passing verdicts. Any other word is refused as a typo.
+claim-auditor = ["OVER-CLAIMED", "UNSUPPORTED", "INCONSISTENT"]
+proof-referee = ["NEEDS-WORK"]
+red-team = ["REFUTED", "NARROWED", "INCONCLUSIVE"]
+cold-reader = ["NEEDS-CONTEXT"]
+expositor = ["NEEDS-WORK"]
+provenance = ["NEEDS-CITATIONS"]
+
+[gates.proof]
+# A changed line inside a proof block (\begin{proof}...\end{proof}, or a line starting
+# "Proof." up to an end-of-proof mark or the next heading) in these files needs these
+# reviews. Optional keys `start` and `end` (lists of regexes) override the block markers;
+# `enabled = false` switches this proof check off.
+paths = ["**/*.md", "**/*.tex"]
+exclude = ["docs/**", "logs/**", ".claude/**", ".gates/**", "**/TEMPLATE*", "AGENTS.md", "COORDINATOR.md", "GLOSSARY.md", "documents/*/source/**", "documents/*/units/**"]
+gates = ["proof-referee", "claim-auditor"]
+
+# A check record whose status becomes `checked` needs the claim-auditor's review of the record
+# itself: the summary and coverage follow from the rows (docs/discipline/checking.md).
+[[gates.rules]]
+paths = ["documents/*/checks.md"]
+status = ["checked"]
+gates = ["claim-auditor"]
+
+[guard]
+# Branches the guard refuses to force-push to or delete.
+main_branches = ["main", "master"]
+# Nudge (once per command) on `git add -A` / `--all` / `.`.
+nudge_git_add_all = true
+# Nudge on in-place `sed -i` / `perl -i` edits of .md / .tex / .txt files.
+nudge_inplace_docs = true
+
+[reflect]
+# Every Nth end of turn with no friction logged, the agent is asked whether anything went
+# wrong that it has not recorded. 0 switches the reminder off (so does HOOKS_QUIET=1).
+friction_nudge_every = 5
+
+[usage]
+# Your own rates, in US dollars per million tokens, so bin/usage-report can estimate cost.
+# Empty by default: the report then shows tokens only. Rates change and differ by plan, so
+# fill in what YOU pay, one table per model; a key matches every model whose name contains
+# it (the longest matching key wins). For example:
+#   [usage.prices."model-name"]
+#   input = 0.0          # uncached input
+#   output = 0.0         # output, reasoning included
+#   cache_read = 0.0
+#   cache_write = 0.0
+# On a flat-rate subscription, prices measure relative weight, not money you were charged.
+[usage.prices]

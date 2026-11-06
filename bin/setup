@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+"""First run of a new math-io workspace: your name, the commit gate, updates, a tool check.
+
+selftest: yes
+
+Usage:
+  bin/setup                  ask your name, turn on the commit gate, make `git pull` merge
+                             updates, check the tools, run bin/selftest, and say what to do
+                             next
+  bin/setup --owner "Name"   set the name without asking
+  bin/setup --check          report what is set up; change nothing
+  bin/setup --no-selftest    skip the bin/selftest run (about a minute)
+  bin/setup --selftest       run the built-in tests in a temporary git repository
+
+Safe to run again: a name already set is kept unless --owner gives a new one. The name goes
+into project.toml (`[project] owner`) and is committed, so the agents and hooks can address
+you. Unless you already have a git pull setting of your own, `pull.rebase = false` goes into this
+clone's git config, so that `git pull` merges an update with your commits instead of stopping.
+Nothing else in the workspace changes.
+"""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import io
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import tomllib
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+UNSET = {"", "the owner"}
+OWNER_LINE = re.compile(r'^owner\s*=\s*"(?:[^"\\]|\\.)*"[ \t]*$', re.M)
+TEX = ("latexmk", "pdflatex", "lualatex", "xelatex")
+
+
+def git(root: Path, *args: str) -> tuple[int, str]:
+    try:
+        r = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, timeout=60)
+    except OSError as e:
+        return 127, str(e)
+    return r.returncode, (r.stdout + r.stderr).strip()
+
+
+def settings(root: Path) -> dict:
+    try:
+        with open(root / "project.toml", "rb") as f:
+            return tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+
+
+def current_owner(root: Path) -> str:
+    return str(settings(root).get("project", {}).get("owner", "")).strip()
+
+
+def toml_string(s: str) -> str:
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def write_owner(root: Path, name: str) -> str | None:
+    """Put `name` in [project] owner, keeping the file's comments. Returns a problem or None."""
+    name = " ".join(name.split())
+    if not name or name.lower() in UNSET:
+        return "the name is empty"
+    p = root / "project.toml"
+    text = p.read_text(encoding="utf-8")
+    start = text.find("[project]")
+    if start < 0:
+        return "project.toml has no [project] table"
+    end = text.find("\n[", start + 1)
+    end = len(text) if end < 0 else end
+    block = text[start:end]
+    line = f"owner = {toml_string(name)}"
+    block, n = OWNER_LINE.subn(lambda _: line, block, count=1)
+    if n == 0:
+        block = block.replace("[project]\n", f"[project]\n{line}\n", 1)
+    p.write_text(text[:start] + block + text[end:], encoding="utf-8")
+    if current_owner(root) != name:
+        return "project.toml did not read back the name written"
+    return None
+
+
+def commit_owner(root: Path) -> str:
+    rc, _ = git(root, "diff", "--quiet", "--", "project.toml")
+    if rc == 0:
+        return "already committed"
+    rc, out = git(root, "commit", "-q", "-m", "Set the owner's name", "--", "project.toml")
+    if rc != 0:
+        return ("not committed (" + (out.splitlines() or ["git failed"])[-1] + "); commit "
+                "project.toml yourself once git knows your name and email")
+    return "committed"
+
+
+def tex() -> str | None:
+    for t in TEX:
+        if shutil.which(t):
+            return t
+    return None
+
+
+def hooks_on(root: Path) -> bool:
+    rc, out = git(root, "config", "--get", "core.hooksPath")
+    return rc == 0 and out == ".githooks"
+
+
+def pull_set(root: Path) -> bool:
+    """A git pull setting at any scope: without one, git refuses to pull onto your own commits."""
+    return any(git(root, "config", "--get", k)[0] == 0 for k in ("pull.rebase", "pull.ff"))
+
+
+def next_steps(root: Path) -> str:
+    if settings(root).get("project", {}).get("harness") == "codex":
+        return ("Next: run `codex` in this folder and trust it when asked, then type /hooks and "
+                "trust the workspace's hooks. Then type $getting-started.")
+    return ("Next: run `claude` in this folder and say yes when it asks to trust it. Then type "
+            "/getting-started.")
+
+
+def setup(root: Path, owner: str | None, ask: bool, run_selftest: bool) -> int:
+    rc, _ = git(root, "rev-parse", "--is-inside-work-tree")
+    if rc != 0:
+        print(f"FAIL  {root} is not a git clone. Clone math-io with git rather than downloading "
+              "it, then run bin/setup again.")
+        return 1
+    failed = False
+
+    have = current_owner(root)
+    if owner is None and have.lower() in UNSET:
+        if ask:
+            _, guess = git(root, "config", "user.name")
+            prompt = "Your name, as the agents should address you" + (f" [{guess}]" if guess else "")
+            try:
+                owner = input(prompt + ": ").strip() or guess
+            except EOFError:
+                owner = None
+        if not owner:
+            print("WARN  no name set: run bin/setup again in a terminal, or bin/setup --owner \"Your Name\"")
+    if owner and owner != have:
+        problem = write_owner(root, owner)
+        if problem:
+            print(f"FAIL  name not saved: {problem}")
+            failed = True
+        else:
+            print(f"PASS  name saved in project.toml: {current_owner(root)} ({commit_owner(root)})")
+    elif have.lower() not in UNSET:
+        print(f"PASS  name already set: {have}")
+
+    if not hooks_on(root):
+        r = subprocess.run([sys.executable, str(root / "bin" / "setup-hooks"), "--root", str(root)],
+                           capture_output=True, text=True)
+        if r.returncode != 0 or not hooks_on(root):
+            print("FAIL  commit gate not turned on: " + (r.stdout + r.stderr).strip())
+            failed = True
+    if hooks_on(root):
+        print("PASS  commit gate on (git core.hooksPath = .githooks)")
+
+    if not pull_set(root):
+        rc, out = git(root, "config", "pull.rebase", "false")
+        if rc != 0:
+            print("FAIL  git pull setting not saved: " + out)
+            failed = True
+    if pull_set(root):
+        print("PASS  updates: `git pull` merges them with your work (git pull.rebase or pull.ff set)")
+
+    t = tex()
+    print(f"PASS  TeX found ({t}): PDFs can be built" if t else
+          "INFO  no TeX found: needed only to build PDFs from LaTeX. Install TeX Live "
+          "(Linux, Windows) or MacTeX (macOS) when you want them")
+
+    if run_selftest and not failed:
+        print("....  running bin/selftest (about a minute)")
+        r = subprocess.run([sys.executable, str(root / "bin" / "selftest")], cwd=root,
+                           capture_output=True, text=True)
+        last = (r.stdout.strip().splitlines() or ["no output"])[-1]
+        print(("PASS  " if r.returncode == 0 else "FAIL  ") + "bin/selftest: " + last +
+              ("" if r.returncode == 0 else "; run bin/selftest -v for details"))
+        failed = failed or r.returncode != 0
+
+    print()
+    print("Setup is incomplete: fix the FAIL lines above, then run bin/setup again."
+          if failed else next_steps(root))
+    return 1 if failed else 0
+
+
+def check(root: Path) -> int:
+    have = current_owner(root)
+    print(f"{'PASS' if have.lower() not in UNSET else 'WARN'}  name: {have or '(not set)'}")
+    print(f"{'PASS' if hooks_on(root) else 'FAIL'}  commit gate on")
+    print(f"{'PASS' if pull_set(root) else 'WARN'}  git pull setting"
+          + ("" if pull_set(root) else ": run bin/setup, or `git config pull.rebase false`"))
+    t = tex()
+    print(f"{'PASS' if t else 'INFO'}  TeX: {t or 'not found'}")
+    return 0 if hooks_on(root) else 1
+
+
+def selftest() -> int:
+    with contextlib.redirect_stdout(io.StringIO()):
+        bad = _selftest()
+    for b in bad:
+        print("SELFTEST FAIL", b)
+    print(f"setup selftest: {'ok' if not bad else f'{len(bad)} failed'}")
+    return 1 if bad else 0
+
+
+def _selftest() -> list[str]:
+    bad: list[str] = []
+    toml = ('# settings\n\n[project]\n# who directs the workspace\nname = "math-io"\n'
+            'owner = "the owner"\nharness = "claude"\n\n[tiers]\nowner = "not this one"\n')
+    with tempfile.TemporaryDirectory() as t:
+        root = Path(t)
+        (root / "project.toml").write_text(toml)
+        (root / "bin").mkdir()
+        shutil.copy(ROOT / "bin" / "setup-hooks", root / "bin" / "setup-hooks")
+        (root / ".githooks").mkdir()
+        (root / ".githooks" / "pre-commit").write_text("#!/bin/sh\nexit 0\n")
+        (root / ".githooks" / "pre-commit").chmod(0o755)  # as committed in a real clone
+        if setup(root, "X", ask=False, run_selftest=False) != 1:
+            bad.append("outside a git clone setup must fail")
+        git(root, "init", "-q")
+        git(root, "config", "user.name", "Test")
+        git(root, "config", "user.email", "test@invalid")
+        git(root, "add", "-A")
+        git(root, "commit", "-q", "-m", "init")
+
+        if setup(root, None, ask=False, run_selftest=False) != 0 or current_owner(root) != "the owner":
+            bad.append("no name given: setup still succeeds and leaves the name unset")
+        if not hooks_on(root):
+            bad.append("setup must turn on the commit gate")
+        if not pull_set(root):
+            bad.append("setup must leave a git pull setting, or `git pull` stops on the first update")
+        git(root, "config", "--local", "pull.rebase", "true")
+        setup(root, None, ask=False, run_selftest=False)
+        if git(root, "config", "--local", "--get", "pull.rebase")[1] != "true":
+            bad.append("setup must keep the owner's own git pull setting")
+        name = 'Ada "A." Lovelace \\ Jr'
+        if setup(root, name, ask=False, run_selftest=False) != 0 or current_owner(root) != name:
+            bad.append(f"name with quotes and a backslash: got {current_owner(root)!r}")
+        text = (root / "project.toml").read_text()
+        if "# who directs the workspace" not in text or 'owner = "not this one"' not in text:
+            bad.append("setup must keep comments and leave other tables' keys alone")
+        rc, out = git(root, "status", "--porcelain")
+        if out:
+            bad.append(f"the name must be committed, but the tree is dirty: {out}")
+        before = (root / "project.toml").read_text()
+        setup(root, None, ask=False, run_selftest=False)
+        if (root / "project.toml").read_text() != before:
+            bad.append("a second run without --owner must change nothing")
+        if write_owner(root, "  ") is None or write_owner(root, "the owner") is None:
+            bad.append("an empty name or the placeholder must be refused")
+        (root / "project.toml").write_text('[project]\nname = "x"\n')
+        if write_owner(root, "B") is not None or current_owner(root) != "B":
+            bad.append("a [project] table without an owner line gets one")
+    return bad
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--owner")
+    ap.add_argument("--check", action="store_true")
+    ap.add_argument("--no-selftest", action="store_true")
+    ap.add_argument("--selftest", action="store_true")
+    a = ap.parse_args()
+    if a.selftest:
+        return selftest()
+    if a.check:
+        return check(ROOT)
+    return setup(ROOT, a.owner, ask=sys.stdin.isatty(), run_selftest=not a.no_selftest)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
